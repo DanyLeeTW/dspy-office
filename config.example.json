@@ -1,0 +1,60 @@
+{
+  "models": {
+    "default": "deepseek-chat",
+    "providers": {
+      "deepseek-chat": {
+        "api_base": "https://api.deepseek.com/v1",
+        "api_key": "YOUR_API_KEY_HERE",
+        "model": "deepseek-chat",
+        "max_tokens": 8192
+      },
+      "openai-gpt4": {
+        "api_base": "https://api.openai.com/v1",
+        "api_key": "YOUR_API_KEY_HERE",
+        "model": "gpt-4o",
+        "max_tokens": 8192
+      }
+    }
+  },
+  "messaging": {
+    "token": "YOUR_MESSAGING_PLATFORM_TOKEN",
+    "guid": "YOUR_MESSAGING_PLATFORM_GUID",
+    "api_url": "http://api.messaging-platform.example.com/api/send"
+  },
+  "owner_ids": ["YOUR_OWNER_USER_ID"],
+  "workspace": "./workspace",
+  "port": 8080,
+  "debounce_seconds": 3.0,
+  "memory": {
+    "enabled": true,
+    "embedding_api": {
+      "api_base": "https://api.openai.com/v1",
+      "api_key": "YOUR_EMBEDDING_API_KEY_HERE",
+      "model": "text-embedding-3-small",
+      "dimension": 1024
+    },
+    "retrieve_top_k": 5,
+    "similarity_threshold": 0.92
+  },
+  "asr": {
+    "app_id": "YOUR_ASR_APP_ID",
+    "api_key": "YOUR_ASR_API_KEY",
+    "api_secret": "YOUR_ASR_API_SECRET",
+    "ws_url": "wss://asr-api.example.com/v2/asr"
+  },
+  "video_api": {
+    "api_base": "https://api.video-generation.example.com/v1",
+    "api_key": "YOUR_VIDEO_API_KEY_HERE",
+    "model": "video-generation-model"
+  },
+  "tavily_api_key": "YOUR_TAVILY_API_KEY_HERE",
+  "search_api_key": "YOUR_SEARCH_API_KEY_HERE",
+  "mcp_servers": {
+    "example-server": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@example/mcp-server"],
+      "env": {}
+    }
+  }
+}
