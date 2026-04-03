@@ -16,9 +16,9 @@
  * - 所有狀態更新均透過 setter 函數，確保不可變性 (Immutability)
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import type { AgentStep, MemoryItem, Tool } from '../types';
-import { defaultTools } from '../data/tools';
+import { fetchMcpServers } from '../data/tools';
 import { runAgent } from '../services/llm';
 
 // ============================================================================
@@ -32,10 +32,17 @@ export function useAgentRunner() {
 
   const [steps, setSteps] = useState<AgentStep[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
-  const [tools, setTools] = useState<Tool[]>(defaultTools.map(t => ({ ...t })));
+  const [tools, setTools] = useState<Tool[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [currentGoal, setCurrentGoal] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  // Load MCP servers on mount
+  useEffect(() => {
+    fetchMcpServers().then(mcpTools => {
+      setTools(mcpTools);
+    });
+  }, []);
 
   /**
    * 中斷控制器 - 使用 AbortController 管理異步請求
@@ -54,7 +61,10 @@ export function useAgentRunner() {
 
     setSteps([]);
     setMemories([]);
-    setTools(defaultTools.map(t => ({ ...t })));
+    // Reset tools to initial state (reload MCP servers)
+    fetchMcpServers().then(mcpTools => {
+      setTools(mcpTools);
+    });
     setIsRunning(false);
     setCurrentGoal('');
     setError(null);
@@ -78,7 +88,8 @@ export function useAgentRunner() {
     setCurrentGoal(goal);
     setIsRunning(true);
     setSteps([]);
-    setTools(defaultTools.map(t => ({ ...t })));
+    // Reset tools to idle state
+    setTools(prev => prev.map(t => ({ ...t, status: 'idle' as const })));
     setError(null);
 
     // Add session memory for the new goal
@@ -99,6 +110,7 @@ export function useAgentRunner() {
             setSteps(prev => [...prev, step]);
           },
           onToolCall: (toolCall) => {
+            console.log('[onToolCall]', toolCall.tool, toolCall.status);
             setTools(prev => prev.map(t =>
               t.name === toolCall.tool
                 ? { ...t, status: toolCall.status === 'running' ? 'active' : 'idle', usageCount: t.usageCount + 1 }

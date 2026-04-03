@@ -23,7 +23,7 @@ import json
 import os
 import logging
 import threading
-from typing import List, Dict, Any, Callable
+from typing import List, Dict, Any, Callable, Optional
 from datetime import datetime, timezone, timedelta
 
 from ..signatures import (
@@ -476,6 +476,8 @@ class CompleteAgent(dspy.Module):
     ):
         super().__init__()
 
+        self.tools = tools or []
+        self.max_iters = max_iters
         self.memory = MemoryModule(retrieve_fn, use_chain_of_thought)
 
         # Build the main agent signature
@@ -523,6 +525,117 @@ class CompleteAgent(dspy.Module):
             response=result.response,
             trajectory=result.trajectory,
             memory_context=memory_result.memory_context
+        )
+
+
+# Tool callback type for streaming
+ToolCallback = Optional[Callable[[str, Any], None]]
+
+
+class StreamingToolAgent(dspy.Module):
+    """
+    Tool agent with callbacks for real-time streaming.
+
+    Emits events:
+    - on_tool_start(tool_name, tool_args)
+    - on_tool_end(tool_name, tool_result)
+    """
+
+    def __init__(
+        self,
+        tools: List[Callable] = None,
+        retrieve_fn: Callable = None,
+        max_iters: int = 20,
+        on_tool_start: Optional[Callable[[str, Any], None]] = None,
+        on_tool_end: Optional[Callable[[str, Any], None]] = None
+    ):
+        super().__init__()
+        self.tools = tools or []
+        self.max_iters = max_iters
+        self.on_tool_start = on_tool_start
+        self.on_tool_end = on_tool_end
+        self.memory = MemoryModule(retrieve_fn, use_chain_of_thought=False) if retrieve_fn else None
+
+        # Build tool name mapping
+        self.tool_map = {t.__name__: t for t in self.tools}
+
+        class StreamingSignature(dspy.Signature):
+            """You are a helpful AI assistant with access to tools.
+            Use tools when necessary. Be concise and helpful.
+            """
+            user_request: str = dspy.InputField()
+            conversation_history: str = dspy.InputField()
+            memory_context: str = dspy.InputField()
+            response: str = dspy.OutputField()
+
+        self.react = dspy.ReAct(
+            StreamingSignature,
+            tools=self._wrap_tools_with_callbacks(),
+            max_iters=max_iters
+        )
+
+    def _wrap_tools_with_callbacks(self) -> List[Callable]:
+        """Wrap tools to emit callbacks."""
+        wrapped_tools = []
+
+        for tool in self.tools:
+            def make_wrapper(original_tool):
+                def wrapper(**kwargs):
+                    tool_name = original_tool.__name__
+
+                    # Emit tool_start callback
+                    if self.on_tool_start:
+                        self.on_tool_start(tool_name, kwargs)
+
+                    # Execute tool
+                    try:
+                        result = original_tool(**kwargs)
+                    except Exception as e:
+                        result = f"Error: {e}"
+
+                    # Emit tool_end callback
+                    if self.on_tool_end:
+                        self.on_tool_end(tool_name, result)
+
+                    return result
+
+                wrapper.__name__ = original_tool.__name__
+                wrapper.__doc__ = original_tool.__doc__
+                return wrapper
+
+            wrapped_tools.append(make_wrapper(tool))
+
+        return wrapped_tools
+
+    def forward(
+        self,
+        user_request: str,
+        conversation_history: str = "",
+        session_key: str = ""
+    ) -> dspy.Prediction:
+        """Process request with streaming callbacks."""
+
+        # Retrieve memories (if memory module is available)
+        memory_context = ""
+        if self.memory:
+            memory_result = self.memory(
+                query=user_request,
+                conversation_context=conversation_history,
+                session_key=session_key
+            )
+            memory_context = memory_result.memory_context
+
+        # Execute with wrapped tools
+        result = self.react(
+            user_request=user_request,
+            conversation_history=conversation_history,
+            memory_context=memory_context
+        )
+
+        return dspy.Prediction(
+            response=result.response,
+            trajectory=result.trajectory,
+            memory_context=memory_context
         )
 
 

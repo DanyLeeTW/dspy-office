@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { GoalInput } from './components/GoalInput';
 import { Scratchpad } from './components/Scratchpad';
 import { ToolPanel } from './components/ToolPanel';
@@ -6,6 +7,7 @@ import { useAgentRunner } from './hooks/useAgentRunner';
 
 function App() {
   const { steps, memories, tools, isRunning, currentGoal, run, reset } = useAgentRunner();
+  const [showToolCallResult, setShowToolCallResult] = useState(true);
 
   const totalUsage = tools.reduce((sum, t) => sum + t.usageCount, 0);
   const activeTools = tools.filter(t => t.status === 'active').length;
@@ -53,7 +55,21 @@ function App() {
         {/* Main Area */}
         <main className="flex-1 flex flex-col p-6 overflow-hidden">
           <GoalInput onSubmit={run} isRunning={isRunning} onReset={reset} />
-          <Scratchpad steps={steps} currentGoal={currentGoal} />
+
+          {/* Options Bar */}
+          <div className="flex items-center gap-4 mb-3 px-1">
+            <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showToolCallResult}
+                onChange={(e) => setShowToolCallResult(e.target.checked)}
+                className="w-3.5 h-3.5 rounded border-border-subtle text-accent focus:ring-accent/50 cursor-pointer"
+              />
+              <span>Show Tool Results</span>
+            </label>
+          </div>
+
+          <Scratchpad steps={steps} currentGoal={currentGoal} showToolCallResult={showToolCallResult} />
         </main>
       </div>
     </div>

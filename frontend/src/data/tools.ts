@@ -1,5 +1,6 @@
 import type { Tool } from '../types';
 
+// Default built-in tools
 export const defaultTools: Tool[] = [
   { name: 'web_search', icon: '🔍', description: 'Search the web with multi-engine routing', usageCount: 0, status: 'idle' },
   { name: 'read_file', icon: '📄', description: 'Read contents of a file', usageCount: 0, status: 'idle' },
@@ -11,3 +12,8 @@ export const defaultTools: Tool[] = [
   { name: 'self_check', icon: '🩺', description: 'Run system diagnostics and health check', usageCount: 0, status: 'idle' },
   { name: 'send_message', icon: '💬', description: 'Send a notification message', usageCount: 0, status: 'idle' },
 ];
+
+// Fetch tools - returns default built-in tools only
+export async function fetchMcpServers(): Promise<Tool[]> {
+  return defaultTools;
+}

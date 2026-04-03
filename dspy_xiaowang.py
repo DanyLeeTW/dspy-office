@@ -102,8 +102,9 @@ if OPTIMIZED_PATH and os.path.exists(OPTIMIZED_PATH):
 else:
     agent = CompleteAgent(
         tools=get_all_tools(),
-        retrieve_fn=mem_mod.retrieve,
-        max_iters=20
+        retrieve_fn=None,  # Disable memory retrieval temporarily
+        max_iters=20,
+        use_chain_of_thought=False  # Disable for GLM-5 compatibility
     )
 
 # Set scheduler chat function
@@ -298,6 +299,22 @@ def handle_callback(data):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Handle /api/mcp-servers - return MCP server config
+        if self.path == "/api/mcp-servers":
+            mcp_servers = CONFIG.get("mcp_servers", {})
+            servers_list = [
+                {"name": name, **cfg}
+                for name, cfg in mcp_servers.items()
+            ]
+            encoded = json.dumps({"mcp_servers": servers_list}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -312,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
         """Handle CORS preflight requests."""
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
@@ -321,7 +338,9 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length)
 
         # Handle /api/chat - sync response for frontend
-        if self.path == "/api/chat":
+        if self.path == "/api/chat" or self.path == "/api/chat/stream":
+            is_stream = self.path == "/api/chat/stream"
+
             def _send_json(status, payload):
                 encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self.send_response(status)
@@ -332,6 +351,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Headers", "Content-Type")
                 self.end_headers()
                 self.wfile.write(encoded)
+
+            def _send_sse_event(event_type: str, data: dict):
+                """Send a single SSE event."""
+                event = f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                self.wfile.write(event.encode("utf-8"))
+                self.wfile.flush()
+
+            def _send_streaming_response():
+                """Send headers for SSE streaming."""
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
 
             try:
                 data = json.loads(body.decode("utf-8"))
@@ -350,7 +384,66 @@ class Handler(BaseHTTPRequestHandler):
                 if context:
                     msg = f"{msg}\n\nContext:\n{context}"
 
-                # Call DSPy agent with error handling
+                # Streaming mode - real-time tool updates
+                if is_stream:
+                    _send_streaming_response()
+
+                    reply = ''
+                    try:
+                        # Emit thinking event
+                        _send_sse_event("thinking", {"content": "Processing request..."})
+
+                        # Define callbacks for streaming
+                        def on_tool_start(tool_name, args):
+                            _send_sse_event("tool_start", {
+                                "tool": tool_name,
+                                "args": args
+                            })
+
+                        def on_tool_end(tool_name, result):
+                            _send_sse_event("tool_end", {
+                                "tool": tool_name,
+                                "result": str(result)[:500] if result else ''
+                            })
+
+                        # Create streaming agent with callbacks
+                        from dspy_agent.modules import StreamingToolAgent
+                        streaming_agent = StreamingToolAgent(
+                            tools=get_all_tools(),
+                            retrieve_fn=None,
+                            max_iters=20,
+                            on_tool_start=on_tool_start,
+                            on_tool_end=on_tool_end
+                        )
+
+                        result = streaming_agent(
+                            user_request=msg,
+                            conversation_history=history,
+                            session_key=session_key
+                        )
+                        reply = result.response
+                        memory_context = result.memory_context if hasattr(result, 'memory_context') else ''
+
+                        # Emit final response
+                        _send_sse_event("response", {
+                            "content": reply,
+                            "memory_context": memory_context
+                        })
+
+                        _send_sse_event("done", {})
+
+                    except Exception as agent_error:
+                        log.warning(f"[api/chat/stream] Agent error: {agent_error}", exc_info=True)
+                        _send_sse_event("error", {"message": str(agent_error)})
+
+                    # Save session
+                    if reply:
+                        messages.append({"role": "user", "content": msg})
+                        messages.append({"role": "assistant", "content": reply})
+                        session_manager.save(session_key, messages)
+                    return
+
+                # Non-streaming mode (original behavior)
                 try:
                     result = agent(
                         user_request=msg,

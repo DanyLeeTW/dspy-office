@@ -24,9 +24,10 @@ function StepIcon({ type }: { type: AgentStep['type'] }) {
 interface Props {
   steps: AgentStep[];
   currentGoal: string;
+  showToolCallResult?: boolean; // 是否顯示工具調用的結果（默認 true）
 }
 
-export function Scratchpad({ steps, currentGoal }: Props) {
+export function Scratchpad({ steps, currentGoal, showToolCallResult = true }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -81,7 +82,7 @@ export function Scratchpad({ steps, currentGoal }: Props) {
                 <StatusDot status={step.status} />
                 <StepIcon type={step.type} />
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 mb-2">
                     <span className="text-xs font-semibold text-accent mono">{step.toolCall.tool}()</span>
                     <span className={`text-xs px-1.5 py-0.5 rounded ${
                       step.toolCall.status === 'running' ? 'bg-status-running/20 text-status-running' :
@@ -91,8 +92,8 @@ export function Scratchpad({ steps, currentGoal }: Props) {
                       {step.toolCall.status}
                     </span>
                   </div>
-                  {step.content && (
-                    <div className="text-xs text-text-muted mb-2 italic">{step.content}</div>
+                  {showToolCallResult && step.content && (
+                    <div className="text-sm text-text-secondary mb-2 bg-surface/50 p-2 rounded">{step.content}</div>
                   )}
                   {Object.keys(step.toolCall.args).length > 0 && (
                     <div className="bg-surface/80 rounded p-2 mb-2">
@@ -102,22 +103,22 @@ export function Scratchpad({ steps, currentGoal }: Props) {
                       </pre>
                     </div>
                   )}
-                  {step.toolCall.result && (
+                  {showToolCallResult && step.toolCall.result && (
                     <div className="bg-surface/80 rounded p-2">
                       <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Result</div>
-                      <pre className="text-xs text-text-secondary mono whitespace-pre-wrap break-words">{step.toolCall.result}</pre>
+                      <div className="text-xs text-text-secondary whitespace-pre-wrap break-words">{step.toolCall.result}</div>
                     </div>
                   )}
                 </div>
               </div>
             )}
             {step.type === 'result' && (
-              <div className="flex items-start gap-3 p-3 ml-6 bg-surface-overlay/30 rounded-lg border border-border-subtle/50">
+              <div className="flex items-start gap-3 p-4 ml-6 bg-surface-overlay/30 rounded-lg border border-border-subtle/50">
                 <StatusDot status={step.status} />
                 <StepIcon type={step.type} />
-                <div className="flex-1 min-w-0 overflow-hidden">
-                  <div className="text-xs text-text-muted uppercase tracking-wider mb-1">Result</div>
-                  <pre className="text-sm text-text-secondary mono whitespace-pre-wrap break-words overflow-wrap-anywhere">{step.content}</pre>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-text-muted uppercase tracking-wider mb-2">Result</div>
+                  <div className="text-sm text-text-primary whitespace-pre-wrap break-words leading-relaxed">{step.content}</div>
                 </div>
               </div>
             )}

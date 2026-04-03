@@ -977,6 +977,274 @@ def remove_tool(name: str, workspace: str = ".") -> str:
 
 
 # ============================================================
+#  NotebookLM Tools
+# ============================================================
+
+def _ensure_mcp_initialized():
+    """Ensure MCP client is initialized for NotebookLM tools."""
+    try:
+        import mcp_client
+        if not hasattr(mcp_client, '_servers') or not mcp_client._servers:
+            import json
+            config_path = os.environ.get("AGENT_CONFIG", "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    cfg = json.load(f)
+                mcp_client.init(cfg)
+    except Exception as e:
+        log.warning(f"[nlm] MCP init failed: {e}")
+
+
+@registry.register
+def nlm_create_notebook(title: str = "") -> str:
+    """
+    Create a new NotebookLM notebook.
+
+    Args:
+        title: Optional title for the notebook
+
+    Returns:
+        Notebook ID and creation status
+    """
+    try:
+        _ensure_mcp_initialized()
+        import mcp_client
+        result = mcp_client.execute("notebooklm__notebook_create", {"title": title})
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
+@registry.register
+def nlm_list_notebooks(max_results: int = 100) -> str:
+    """
+    List all NotebookLM notebooks.
+
+    Args:
+        max_results: Maximum number of notebooks to return (default 100)
+
+    Returns:
+        List of notebooks with IDs and titles
+    """
+    try:
+        _ensure_mcp_initialized()
+        import mcp_client
+        result = mcp_client.execute("notebooklm__notebook_list", {"max_results": max_results})
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
+@registry.register
+def nlm_add_source(notebook_id: str, source_type: str, url: str = None,
+                   text: str = None, file_path: str = None, title: str = None) -> str:
+    """
+    Add a source to a NotebookLM notebook.
+
+    Supports: url, text, drive, file
+
+    Args:
+        notebook_id: Notebook UUID
+        source_type: Type of source (url/text/drive/file)
+        url: URL for web pages or YouTube (source_type=url)
+        text: Text content (source_type=text)
+        file_path: Local file path for PDF/text/audio (source_type=file)
+        title: Display title (for text sources)
+
+    Returns:
+        Source addition status
+    """
+    try:
+        _ensure_mcp_initialized()
+        import mcp_client
+        args = {"notebook_id": notebook_id, "source_type": source_type}
+        if url:
+            args["url"] = url
+        if text:
+            args["text"] = text
+        if file_path:
+            args["file_path"] = file_path
+        if title:
+            args["title"] = title
+        result = mcp_client.execute("notebooklm__source_add", args)
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
+@registry.register
+def nlm_query(notebook_id: str, query: str, source_ids: List[str] = None) -> str:
+    """
+    Ask AI about sources in a NotebookLM notebook.
+
+    Args:
+        notebook_id: Notebook UUID
+        query: Question to ask
+        source_ids: Optional list of source IDs to query (default: all)
+
+    Returns:
+        AI response with citations
+    """
+    try:
+        _ensure_mcp_initialized()
+        import mcp_client
+        args = {"notebook_id": notebook_id, "query": query}
+        if source_ids:
+            args["source_ids"] = source_ids
+        result = mcp_client.execute("notebooklm__notebook_query", args)
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
+@registry.register
+def nlm_create_audio(notebook_id: str, audio_format: str = "deep_dive",
+                     audio_length: str = "default") -> str:
+    """
+    Create an Audio Overview (podcast) from notebook sources.
+
+    Args:
+        notebook_id: Notebook UUID
+        audio_format: Format type (deep_dive/brief/critique/debate)
+        audio_length: Length (short/default/long)
+
+    Returns:
+        Audio generation status and URL when complete
+    """
+    try:
+        _ensure_mcp_initialized()
+        import mcp_client
+        args = {
+            "notebook_id": notebook_id,
+            "artifact_type": "audio",
+            "audio_format": audio_format,
+            "audio_length": audio_length,
+            "confirm": True
+        }
+        result = mcp_client.execute("notebooklm__studio_create", args)
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
+@registry.register
+def nlm_create_mindmap(notebook_id: str, title: str = "Mind Map") -> str:
+    """
+    Create a mind map from notebook sources.
+
+    Args:
+        notebook_id: Notebook UUID
+        title: Title for the mind map
+
+    Returns:
+        Mind map generation status
+    """
+    try:
+        _ensure_mcp_initialized()
+        import mcp_client
+        args = {
+            "notebook_id": notebook_id,
+            "artifact_type": "mind_map",
+            "title": title,
+            "confirm": True
+        }
+        result = mcp_client.execute("notebooklm__studio_create", args)
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
+@registry.register
+def nlm_create_quiz(notebook_id: str, question_count: int = 5,
+                    difficulty: str = "medium") -> str:
+    """
+    Create a quiz from notebook sources.
+
+    Args:
+        notebook_id: Notebook UUID
+        question_count: Number of questions (default 5)
+        difficulty: Difficulty level (easy/medium/hard)
+
+    Returns:
+        Quiz generation status
+    """
+    try:
+        _ensure_mcp_initialized()
+        import mcp_client
+        args = {
+            "notebook_id": notebook_id,
+            "artifact_type": "quiz",
+            "question_count": question_count,
+            "difficulty": difficulty,
+            "confirm": True
+        }
+        result = mcp_client.execute("notebooklm__studio_create", args)
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
+@registry.register
+def nlm_research(query: str, mode: str = "fast", source: str = "web",
+                 notebook_id: str = None, title: str = None) -> str:
+    """
+    Deep research: search web or Google Drive to find new sources.
+
+    Args:
+        query: What to search for
+        mode: Research mode (fast ~30s ~10 sources, or deep ~5min ~40 sources)
+        source: Where to search (web or drive)
+        notebook_id: Existing notebook ID (creates new if not provided)
+        title: Title for new notebook
+
+    Returns:
+        Research task status
+    """
+    try:
+        _ensure_mcp_initialized()
+        import mcp_client
+        args = {
+            "query": query,
+            "mode": mode,
+            "source": source
+        }
+        if notebook_id:
+            args["notebook_id"] = notebook_id
+        if title:
+            args["title"] = title
+        result = mcp_client.execute("notebooklm__research_start", args)
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
+@registry.register
+def nlm_download_audio(notebook_id: str, output_path: str) -> str:
+    """
+    Download Audio Overview from notebook.
+
+    Args:
+        notebook_id: Notebook UUID
+        output_path: Path to save the audio file (e.g., /path/to/podcast.mp3)
+
+    Returns:
+        Download status and file path
+    """
+    try:
+        _ensure_mcp_initialized()
+        import mcp_client
+        args = {
+            "notebook_id": notebook_id,
+            "artifact_type": "audio",
+            "output_path": output_path
+        }
+        result = mcp_client.execute("notebooklm__download_artifact", args)
+        return result
+    except Exception as e:
+        return f"[error] {e}"
+
+
+# ============================================================
 #  Export for DSPy ReAct
 # ============================================================
 

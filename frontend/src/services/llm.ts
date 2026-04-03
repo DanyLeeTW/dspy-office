@@ -21,7 +21,7 @@ let stepCounter = 0;
 const generateStepId = (type: string) => `step-${Date.now()}-${++stepCounter}-${type}`;
 
 /**
- * Run agent by calling backend API
+ * Run agent using Server-Sent Events for real-time updates
  */
 export async function runAgent(
   goal: string,
@@ -32,20 +32,14 @@ export async function runAgent(
   const baseUrl = getApiBaseUrl();
 
   try {
-    // Emit thinking step
-    const thinkingStepId = generateStepId('thinking');
-    callbacks.onStep({
-      id: thinkingStepId,
-      type: 'thinking',
-      content: `Analyzing goal: "${goal}"`,
-      status: 'running'
-    });
+    console.log('[Sending Request]', { goal, memoryContext });
 
-    // Call backend API
-    const response = await fetch(`${baseUrl}/api/chat`, {
+    // Use EventSource for SSE with POST (via fetch)
+    const response = await fetch(`${baseUrl}/api/chat/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Accept': 'text/event-stream',
       },
       body: JSON.stringify({
         message: goal,
@@ -58,57 +52,108 @@ export async function runAgent(
       throw new Error(`API error: ${response.status} ${response.statusText}`);
     }
 
-    // Complete thinking step
-    callbacks.onStep({
-      id: generateStepId('thinking-complete'),
-      type: 'thinking',
-      content: `Analyzing goal: "${goal}" - Complete`,
-      status: 'complete'
-    });
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('No response body');
 
-    const text = await response.text();
-    if (!text) throw new Error('Empty response from server');
-    const data = JSON.parse(text);
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let memoryContextResult = '';
 
-    // Emit tool call steps if available
-    if (data.tool_calls && Array.isArray(data.tool_calls)) {
-      for (const tc of data.tool_calls) {
-        // Skip 'finish' tool which is internal
-        if (tc.tool === 'finish') continue;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-        callbacks.onToolCall({
-          tool: tc.tool,
-          args: tc.args || {},
-          result: tc.result,
-          status: 'complete'
-        });
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-        callbacks.onStep({
-          id: generateStepId('tool_call'),
-          type: 'tool_call',
-          content: tc.thought || tc.result || `Executed ${tc.tool}`,
-          toolCall: {
-            tool: tc.tool,
-            args: tc.args || {},
-            result: tc.result,
-            status: 'complete'
-          },
-          status: 'complete'
-        });
+      let eventType = '';
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7);
+        } else if (line.startsWith('data: ')) {
+          const data = JSON.parse(line.slice(6));
+          console.log('[SSE Event]', eventType, data);
+
+          switch (eventType) {
+            case 'thinking':
+              callbacks.onStep({
+                id: generateStepId('thinking'),
+                type: 'thinking',
+                content: data.content,
+                status: 'running'
+              });
+              break;
+
+            case 'tool_start':
+              callbacks.onToolCall({
+                tool: data.tool,
+                args: data.args || {},
+                status: 'running'
+              });
+              callbacks.onStep({
+                id: generateStepId('tool_call'),
+                type: 'tool_call',
+                content: `Calling ${data.tool}...`,
+                toolCall: {
+                  tool: data.tool,
+                  args: data.args || {},
+                  status: 'running'
+                },
+                status: 'running'
+              });
+              break;
+
+            case 'tool_end':
+              callbacks.onToolCall({
+                tool: data.tool,
+                args: {},
+                result: data.result,
+                status: 'complete'
+              });
+              callbacks.onStep({
+                id: generateStepId('tool_result'),
+                type: 'tool_call',
+                content: data.result || `Completed ${data.tool}`,
+                toolCall: {
+                  tool: data.tool,
+                  args: {},
+                  result: data.result,
+                  status: 'complete'
+                },
+                status: 'complete'
+              });
+              break;
+
+            case 'response':
+              memoryContextResult = data.memory_context || '';
+              callbacks.onStep({
+                id: generateStepId('result'),
+                type: 'result',
+                content: data.content,
+                status: 'complete'
+              });
+              break;
+
+            case 'error':
+              callbacks.onStep({
+                id: generateStepId('error'),
+                type: 'result',
+                content: `Error: ${data.message}`,
+                status: 'error'
+              });
+              callbacks.onError(new Error(data.message));
+              break;
+
+            case 'done':
+              callbacks.onComplete({
+                memoryContext: memoryContextResult
+              });
+              break;
+          }
+        }
       }
     }
-
-    // Emit result step
-    callbacks.onStep({
-      id: generateStepId('result'),
-      type: 'result',
-      content: data.response || data.content || data.message || JSON.stringify(data),
-      status: 'complete'
-    });
-
-    callbacks.onComplete({
-      memoryContext: data.memory_context
-    });
   } catch (error) {
     if (signal?.aborted) return;
 
