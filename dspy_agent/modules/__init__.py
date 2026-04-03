@@ -23,15 +23,11 @@ import json
 import os
 import logging
 import threading
-import time
-from typing import Optional, List, Dict, Any, Callable
+from typing import List, Dict, Any, Callable
 from datetime import datetime, timezone, timedelta
 
 from ..signatures import (
     AgentSignature,
-    ToolSelectionSignature,
-    ToolExecutionSignature,
-    MemoryCompressionSignature,
     MemoryRetrievalSignature,
     MemorySynthesisSignature,
     ScheduledTaskExecutionSignature,
@@ -303,14 +299,6 @@ class ToolAgent(dspy.Module):
         self.tools = tools or []
         self.max_iters = max_iters
 
-        # Build signature with instructions
-        instructions = """You are a helpful AI assistant that uses tools to help users.
-
-        Analyze the user's request carefully and select the most appropriate tool.
-        If no tool is needed, respond directly to the user.
-        Be concise and helpful in your responses.
-        """
-
         # Create a proper signature class
         class ToolAgentSignature(dspy.Signature):
             """You are a helpful AI assistant that uses tools to help users.
@@ -407,34 +395,6 @@ class MemoryModule(dspy.Module):
             search_keywords=retrieval_result.search_keywords,
             raw_memories=raw_memories
         )
-
-
-# ============================================================
-#  Memory Compression Module
-# ============================================================
-
-class MemoryCompressor(dspy.Module):
-    """
-    DSPy module for compressing conversation into long-term memories.
-
-    Replaces the LLM-based compression in memory.py with DSPy module.
-
-    Usage:
-        compressor = MemoryCompressor()
-        memories = compressor(conversation="User: I like Python\\nAssistant: ...")
-        # memories.memories is a list of extracted facts
-    """
-
-    def __init__(self, use_chain_of_thought: bool = True):
-        super().__init__()
-        if use_chain_of_thought:
-            self.compress = dspy.ChainOfThought(MemoryCompressionSignature)
-        else:
-            self.compress = dspy.Predict(MemoryCompressionSignature)
-
-    def forward(self, conversation: str) -> dspy.Prediction:
-        """Extract structured memories from conversation."""
-        return self.compress(conversation=conversation)
 
 
 # ============================================================

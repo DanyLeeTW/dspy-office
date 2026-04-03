@@ -91,21 +91,33 @@ export function Scratchpad({ steps, currentGoal }: Props) {
                       {step.toolCall.status}
                     </span>
                   </div>
-                  <div className="text-xs text-text-muted mb-1">{step.content}</div>
-                  <div className="bg-surface/80 rounded p-2 mt-1">
-                    <pre className="text-xs text-text-secondary mono whitespace-pre-wrap">
-                      {Object.entries(step.toolCall.args).map(([k, v]) => `${k}: ${v}`).join('\n')}
-                    </pre>
-                  </div>
+                  {step.content && (
+                    <div className="text-xs text-text-muted mb-2 italic">{step.content}</div>
+                  )}
+                  {Object.keys(step.toolCall.args).length > 0 && (
+                    <div className="bg-surface/80 rounded p-2 mb-2">
+                      <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Arguments</div>
+                      <pre className="text-xs text-text-secondary mono whitespace-pre-wrap break-words">
+                        {Object.entries(step.toolCall.args).map(([k, v]) => `${k}: ${v}`).join('\n')}
+                      </pre>
+                    </div>
+                  )}
+                  {step.toolCall.result && (
+                    <div className="bg-surface/80 rounded p-2">
+                      <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Result</div>
+                      <pre className="text-xs text-text-secondary mono whitespace-pre-wrap break-words">{step.toolCall.result}</pre>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
             {step.type === 'result' && (
-              <div className="flex items-start gap-3 p-3 ml-6 rounded-lg">
+              <div className="flex items-start gap-3 p-3 ml-6 bg-surface-overlay/30 rounded-lg border border-border-subtle/50">
                 <StatusDot status={step.status} />
                 <StepIcon type={step.type} />
-                <div className="flex-1 min-w-0">
-                  <pre className="text-sm text-text-secondary mono whitespace-pre-wrap">{step.content}</pre>
+                <div className="flex-1 min-w-0 overflow-hidden">
+                  <div className="text-xs text-text-muted uppercase tracking-wider mb-1">Result</div>
+                  <pre className="text-sm text-text-secondary mono whitespace-pre-wrap break-words overflow-wrap-anywhere">{step.content}</pre>
                 </div>
               </div>
             )}

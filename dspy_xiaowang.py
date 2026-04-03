@@ -73,6 +73,10 @@ configure_from_file(CONFIG_PATH)
 import messaging
 messaging.init(CONFIG["messaging"])
 
+# Initialize llm module for fallback
+import llm
+llm.init(CONFIG["models"], WORKSPACE, next(iter(OWNER_IDS), ""), SESSIONS_DIR)
+
 # Initialize session manager
 session_manager = SessionManager(SESSIONS_DIR)
 
@@ -296,6 +300,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(json.dumps({
             "status": "ok",
@@ -303,10 +308,100 @@ class Handler(BaseHTTPRequestHandler):
             "version": "2.0.0"
         }).encode())
 
+    def do_OPTIONS(self):
+        """Handle CORS preflight requests."""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+
+        # Handle /api/chat - sync response for frontend
+        if self.path == "/api/chat":
+            def _send_json(status, payload):
+                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            try:
+                data = json.loads(body.decode("utf-8"))
+                msg = data.get("message", "") or data.get("msg", "")
+                if not msg:
+                    raise ValueError("missing 'message' field")
+
+                session_key = data.get("session_key", "frontend_session")
+                context = data.get("context", "")
+
+                # Format conversation history
+                messages = session_manager.load(session_key)
+                history = format_conversation_history(messages)
+
+                # Add context if provided
+                if context:
+                    msg = f"{msg}\n\nContext:\n{context}"
+
+                # Call DSPy agent with error handling
+                try:
+                    result = agent(
+                        user_request=msg,
+                        conversation_history=history,
+                        session_key=session_key
+                    )
+                    reply = result.response
+
+                    # Extract trajectory (tool calls) - DSPy format: {thought_0, tool_name_0, tool_args_0, observation_0, ...}
+                    tool_calls = []
+                    if hasattr(result, 'trajectory') and result.trajectory:
+                        traj = result.trajectory
+                        idx = 0
+                        while f'tool_name_{idx}' in traj:
+                            tool_calls.append({
+                                "tool": traj.get(f'tool_name_{idx}', ''),
+                                "args": traj.get(f'tool_args_{idx}', {}),
+                                "thought": traj.get(f'thought_{idx}', ''),
+                                "result": traj.get(f'observation_{idx}', '')[:500] if traj.get(f'observation_{idx}') else ''
+                            })
+                            idx += 1
+
+                    memory_context = result.memory_context if hasattr(result, 'memory_context') else ''
+
+                except Exception as agent_error:
+                    log.warning(f"[api/chat] DSPy agent error, using fallback: {agent_error}")
+                    # Fallback: use simple LLM call without DSPy modules
+                    import llm as llm_mod
+                    reply = llm_mod.chat(msg, session_key)
+                    tool_calls = []
+                    memory_context = ''
+
+                # Save session
+                messages.append({"role": "user", "content": msg})
+                messages.append({"role": "assistant", "content": reply})
+                session_manager.save(session_key, messages)
+
+                _send_json(200, {
+                    "response": reply,
+                    "tool_calls": tool_calls,
+                    "memory_context": memory_context
+                })
+
+            except Exception as e:
+                log.error(f"[api/chat] error: {e}", exc_info=True)
+                _send_json(400 if isinstance(e, ValueError) else 500, {"error": str(e)})
+            return
+
+        # Handle other POST requests
         self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(b"")
 

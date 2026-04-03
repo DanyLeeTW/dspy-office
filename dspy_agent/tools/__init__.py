@@ -28,8 +28,7 @@ import time
 import urllib.request
 import urllib.parse
 import logging
-from typing import Optional, List, Dict, Any, Callable
-from functools import wraps
+from typing import Optional, List, Dict, Callable
 
 log = logging.getLogger("dspy_agent")
 
@@ -992,16 +991,3 @@ def get_all_tools() -> List[Callable]:
     return registry.get_tools()
 
 
-def get_tools_by_category() -> Dict[str, List[Callable]]:
-    """Get tools organized by category."""
-    return {
-        "core": [exec, message],
-        "files": [read_file, write_file, edit_file, list_files],
-        "scheduling": [schedule, list_schedules, remove_schedule],
-        "media": [send_image, send_file, send_video, send_link],
-        "video": [trim_video, add_bgm],
-        "search": [web_search],
-        "memory": [search_memory, recall],
-        "diagnostics": [self_check, diagnose],
-        "self_evolution": [create_tool, list_custom_tools, remove_tool],
-    }
