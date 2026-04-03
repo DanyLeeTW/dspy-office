@@ -49,19 +49,23 @@ def configure_lm(config: Dict[str, Any]) -> None:
     """
     Configure DSPy language model from config.
 
+    Supports:
+    - OpenAI-compatible APIs (OpenAI, DeepSeek, Tencent Coding, etc.)
+    - Custom base URLs for enterprise deployments
+
     Args:
         config: Configuration dict with 'models' key containing providers
 
     Example:
         config = {
             "models": {
-                "default": "deepseek-chat",
+                "default": "glm-5",
                 "providers": {
-                    "deepseek-chat": {
-                        "api_base": "https://api.deepseek.com/v1",
+                    "glm-5": {
+                        "api_base": "https://api.lkeap.cloud.tencent.com/coding/v3",
                         "api_key": "...",
-                        "model": "deepseek-chat",
-                        "max_tokens": 8192
+                        "model": "glm-5",
+                        "max_tokens": 16384
                     }
                 }
             }

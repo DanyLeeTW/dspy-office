@@ -37,7 +37,7 @@ def configure_from_file(config_path: str) -> Dict[str, Any]:
         config = json.load(f)
 
     # Configure DSPy LM
-    from .modules import configure_lm
+    from dspy_agent.modules import configure_lm
     configure_lm(config)
 
     return config

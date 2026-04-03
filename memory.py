@@ -156,7 +156,7 @@ def get_cached_context(session_key):
 
 
 def _embed(texts):
-    """Call embedding API, return list of vectors."""
+    """Call embedding API, return list of vectors. Supports OpenAI and Gemini APIs."""
     if not texts:
         return []
 
@@ -166,25 +166,63 @@ def _embed(texts):
     model = cfg.get("model", "text-embedding-3-small")
     dimension = cfg.get("dimension", 1024)
 
-    body = json.dumps({
-        "model": model,
-        "input": texts,
-        "dimensions": dimension,
-    }).encode("utf-8")
+    # Detect Gemini API
+    is_gemini = "generativelanguage.googleapis.com" in api_base.lower()
 
-    req = urllib.request.Request(
-        api_base.rstrip("/") + "/embeddings",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + api_key,
-        },
-    )
+    if is_gemini:
+        # Gemini API format
+        # POST /models/{model}:batchEmbedContents
+        url = api_base.rstrip("/") + f"/models/{model}:batchEmbedContents"
 
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
+        # Build Gemini request body
+        requests_list = []
+        for text in texts:
+            requests_list.append({
+                "model": f"models/{model}",
+                "content": {
+                    "parts": [{"text": text}]
+                }
+            })
 
-    return [item["embedding"] for item in data["data"]]
+        body = json.dumps({"requests": requests_list}).encode("utf-8")
+
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+        )
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+
+        # Gemini response format: {"embeddings": [{"values": [...]}, ...]}
+        embeddings = data.get("embeddings", [])
+        return [emb.get("values", []) for emb in embeddings]
+
+    else:
+        # OpenAI-compatible format
+        body = json.dumps({
+            "model": model,
+            "input": texts,
+            "dimensions": dimension,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            api_base.rstrip("/") + "/embeddings",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + api_key,
+            },
+        )
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+
+        return [item["embedding"] for item in data["data"]]
 
 
 # ============================================================

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3.12
 """
 DSPy Agent - Entry Point
 
@@ -12,7 +13,7 @@ Key Differences from Original:
 4. RAG-based memory retrieval
 
 Usage:
-    python3 dspy_xiaowang.py
+    python3.12 dspy_xiaowang.py
 
 Environment Variables:
     AGENT_CONFIG: Path to config.json (default: ./config.json)
