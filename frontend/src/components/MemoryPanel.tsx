@@ -43,7 +43,9 @@ export function MemoryPanel({ memories }: Props) {
                     <div key={i} className="flex items-start gap-1.5 animate-slide-in">
                       <div className={`w-1 h-1 rounded-full mt-1.5 flex-shrink-0 ${config.color.replace('text-', 'bg-')}`} />
                       <div className="flex-1 min-w-0">
-                        <div className="text-[11px] text-text-secondary leading-tight">{item.content}</div>
+                        <div className="text-[11px] text-text-secondary leading-tight" title={item.content}>
+                          {item.content.length > 50 ? item.content.slice(0, 50) + '…' : item.content}
+                        </div>
                         {item.relevance !== undefined && (
                           <div className="text-[9px] text-text-muted mt-0.5">
                             relevance: {(item.relevance * 100).toFixed(0)}%

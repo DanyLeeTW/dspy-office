@@ -51,7 +51,9 @@ export function Scratchpad({ steps, currentGoal, showToolCallResult = true }: Pr
       {currentGoal && (
         <div className="mb-4 p-3 bg-accent/5 border border-accent/20 rounded-lg animate-slide-in">
           <div className="text-xs text-accent font-semibold uppercase tracking-wider mb-1">Goal</div>
-          <div className="text-text-primary">{currentGoal}</div>
+          <div className="text-text-primary" title={currentGoal}>
+            {currentGoal.length > 50 ? currentGoal.slice(0, 50) + '…' : currentGoal}
+          </div>
         </div>
       )}
       <div className="space-y-2">
