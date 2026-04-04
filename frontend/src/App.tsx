@@ -8,7 +8,6 @@ import { useAgentRunner } from './hooks/useAgentRunner';
 function App() {
   const { steps, memories, tools, isRunning, currentGoal, run, reset } = useAgentRunner();
   const [showToolCallResult, setShowToolCallResult] = useState(true);
-
   const totalUsage = tools.reduce((sum, t) => sum + t.usageCount, 0);
   const activeTools = tools.filter(t => t.status === 'active').length;
   const completedSteps = steps.filter(s => s.status === 'complete').length;

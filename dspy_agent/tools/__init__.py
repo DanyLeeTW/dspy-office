@@ -27,8 +27,12 @@ import os
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
+import tempfile
+import base64
 import logging
-from typing import Optional, List, Dict, Callable
+import functools
+from typing import Optional, List, Dict, Callable, Any
 
 log = logging.getLogger("dspy_agent")
 
@@ -89,7 +93,15 @@ class ToolRegistry:
 
     def get_tools(self) -> List[Callable]:
         """Get all registered tools for DSPy ReAct."""
-        return list(self._tools.values())
+        def _wrap(f):
+            @functools.wraps(f)
+            def wrapper(*args, **kwargs):
+                # DSPy sometimes passes args as tool(kwargs={...}) — unpack it
+                if kwargs.keys() == {'kwargs'} and isinstance(kwargs['kwargs'], dict):
+                    kwargs = kwargs['kwargs']
+                return f(*args, **kwargs)
+            return wrapper
+        return [_wrap(f) for f in self._tools.values()]
 
     def get_tool(self, name: str) -> Optional[Callable]:
         """Get a specific tool by name."""
@@ -213,6 +225,7 @@ def _resolve_path(path: str, workspace: str = ".") -> str:
 def read_file(path: str, workspace: str = ".") -> str:
     """
     Read file content. Path relative to workspace directory.
+    Supports text files and PDFs (extracts text from PDFs).
 
     Args:
         path: File path (relative to workspace or absolute)
@@ -223,6 +236,11 @@ def read_file(path: str, workspace: str = ".") -> str:
     """
     fpath = _resolve_path(path, workspace)
     try:
+        # Check if PDF
+        if fpath.lower().endswith('.pdf'):
+            return _extract_pdf_text(fpath)
+
+        # Regular text file
         with open(fpath, "r", encoding="utf-8") as f:
             content = f.read()
         if len(content) > 10000:
@@ -232,6 +250,43 @@ def read_file(path: str, workspace: str = ".") -> str:
         return f"[error] file not found: {fpath}"
     except Exception as e:
         return f"[error] {e}"
+
+
+def _extract_pdf_text(fpath: str) -> str:
+    """Extract text from PDF file using pdfplumber or pypdf."""
+    try:
+        # Try pdfplumber first (better text extraction)
+        import pdfplumber
+        text_parts = []
+        with pdfplumber.open(fpath) as pdf:
+            for i, page in enumerate(pdf.pages):
+                page_text = page.extract_text() or ""
+                if page_text.strip():
+                    text_parts.append(f"--- Page {i+1} ---\n{page_text}")
+        content = "\n\n".join(text_parts)
+        if len(content) > 10000:
+            content = content[:10000] + f"\n... (truncated, total {len(content)} chars)"
+        return content or "(no text extracted from PDF)"
+    except ImportError:
+        pass
+
+    # Fallback to pypdf
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(fpath)
+        text_parts = []
+        for i, page in enumerate(reader.pages):
+            page_text = page.extract_text() or ""
+            if page_text.strip():
+                text_parts.append(f"--- Page {i+1} ---\n{page_text}")
+        content = "\n\n".join(text_parts)
+        if len(content) > 10000:
+            content = content[:10000] + f"\n... (truncated, total {len(content)} chars)"
+        return content or "(no text extracted from PDF)"
+    except ImportError:
+        return "[error] PDF support requires pdfplumber or pypdf. Install with: pip install pdfplumber"
+    except Exception as e:
+        return f"[error] Failed to extract PDF text: {e}"
 
 
 @registry.register
@@ -326,6 +381,120 @@ def list_files(file_type: str = "", limit: int = 20, workspace: str = ".") -> st
         lines.append(f"  - [{e.get('type', '?')}] {e.get('filename', '?')} ({size_str}) {e.get('time', '?')}")
         lines.append(f"    Path: {e.get('path', '?')}")
     return "\n".join(lines)
+
+
+@registry.register
+def upload_file(url: str, filename: str = None, workspace: str = ".") -> str:
+    """
+    Download a file from URL and save to workspace/files/.
+
+    Supports images, videos, PDFs, and other file types.
+    Files are organized by month (YYYY-MM) and registered in the file index.
+
+    Args:
+        url: File URL to download (http/https)
+        filename: Optional custom filename (auto-generated if not provided)
+        workspace: Workspace directory
+
+    Returns:
+        Local file path and metadata
+    """
+    from datetime import datetime, timezone, timedelta
+
+    if not url.startswith(("http://", "https://")):
+        return f"[error] URL must start with http:// or https://"
+
+    try:
+        # Parse URL for filename
+        parsed = urllib.parse.urlparse(url)
+        url_filename = os.path.basename(urllib.parse.unquote(parsed.path))
+
+        # Determine file extension
+        ext = os.path.splitext(url_filename)[1]
+        if not ext:
+            # Try to get extension from content-type
+            import urllib.request
+            response = urllib.request.urlopen(url, timeout=30)
+            content_type = response.headers.get("Content-Type", "")
+            ext_map = {
+                "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+                "video/mp4": ".mp4", "video/webm": ".webm",
+                "application/pdf": ".pdf",
+                "application/zip": ".zip",
+                "audio/mpeg": ".mp3", "audio/wav": ".wav"
+            }
+            ext = ext_map.get(content_type.split(";")[0], "")
+
+        # Generate filename if not provided
+        if not filename:
+            filename = url_filename if url_filename else f"file_{int(time.time())}"
+            if ext and not filename.endswith(ext):
+                filename += ext
+
+        # Create output directory (workspace/files/YYYY-MM/)
+        cst = timezone(timedelta(hours=8))
+        now = datetime.now(cst)
+        out_dir = os.path.join(workspace, "files", now.strftime("%Y-%m"))
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Generate unique filename if file exists
+        base, ext_part = os.path.splitext(filename)
+        counter = 1
+        output_path = os.path.join(out_dir, filename)
+        while os.path.exists(output_path):
+            filename = f"{base}_{counter}{ext_part}"
+            output_path = os.path.join(out_dir, filename)
+            counter += 1
+
+        # Download file
+        log.info(f"[upload] downloading {url[:80]} -> {output_path}")
+        urllib.request.urlretrieve(url, output_path)
+
+        # Get file size
+        file_size = os.path.getsize(output_path)
+
+        # Determine file type
+        ext_lower = ext.lower()
+        if ext_lower in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+            file_type = "image"
+        elif ext_lower in (".mp4", ".mov", ".avi", ".webm", ".mkv"):
+            file_type = "video"
+        elif ext_lower in (".mp3", ".wav", ".ogg", ".m4a"):
+            file_type = "voice"
+        else:
+            file_type = "file"
+
+        # Update file index
+        index_path = os.path.join(workspace, "files", "index.json")
+        try:
+            with open(index_path, "r", encoding="utf-8") as f:
+                index = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            index = []
+
+        entry = {
+            "type": file_type,
+            "filename": filename,
+            "path": output_path,
+            "size": file_size,
+            "time": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "url": url
+        }
+        index.append(entry)
+
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False, indent=2)
+
+        size_str = f"{file_size/1024/1024:.1f}MB" if file_size > 1024*1024 else f"{file_size/1024:.0f}KB"
+        log.info(f"[upload] saved: {output_path} ({size_str})")
+
+        return f"File uploaded: {output_path}\nType: {file_type}, Size: {size_str}"
+
+    except urllib.error.URLError as e:
+        return f"[error] Download failed: {e}"
+    except Exception as e:
+        log.error(f"[upload] error: {e}", exc_info=True)
+        return f"[error] {e}"
 
 
 # ============================================================

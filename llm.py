@@ -42,9 +42,37 @@ def init(models_config, workspace, owner_id, sessions_dir):
 #  LLM API Call
 # ============================================================
 
+# Provider override flag (set when PDF is detected)
+_provider_override = None
+
+
+def set_provider_override(provider_name: str):
+    """Override the default provider (e.g., switch to glm-5 for PDF processing)."""
+    global _provider_override
+    _provider_override = provider_name
+    log.info(f"[llm] Provider override set to: {provider_name}")
+
+
+def clear_provider_override():
+    """Clear the provider override."""
+    global _provider_override
+    _provider_override = None
+
+
 def _get_provider():
+    """Get the current provider (with override support)."""
+    # Check for override first
+    if _provider_override and _provider_override in _config.get("providers", {}):
+        return _config["providers"][_provider_override]
+    # Fall back to default
     default_name = _config["default"]
     return _config["providers"][default_name]
+
+
+def _check_for_pdf_in_goal(goal: str) -> bool:
+    """Detect pasted PDF content by the header the frontend injects."""
+    import re
+    return bool(re.search(r'^---\s+.*\.pdf\s+---', goal, re.IGNORECASE | re.MULTILINE))
 
 
 def _call_llm(messages, tool_defs):
@@ -325,6 +353,10 @@ def _chat_inner(user_msg, session_key, images=None):
     import time as _time
     t0 = _time.monotonic()
 
+    # Auto-switch to glm-5 when pasted PDF content is detected
+    if isinstance(user_msg, str) and _check_for_pdf_in_goal(user_msg):
+        set_provider_override("glm-5")
+
     messages = _load_session(session_key)
 
     # Build user message (may include images)
@@ -377,6 +409,7 @@ def _chat_inner(user_msg, session_key, images=None):
         tool_calls = msg.get("tool_calls")
         if not tool_calls:
             _save_session(session_key, messages)
+            clear_provider_override()  # Reset provider after completion
             log.info("[perf] sync | prep=%.0fms | llm=%.0fms | tools=%d | total=%.0fms",
                      t_prep, t_llm_total, tool_count, (_time.monotonic() - t0) * 1000)
             return msg.get("content", "")
@@ -395,6 +428,7 @@ def _chat_inner(user_msg, session_key, images=None):
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
 
     _save_session(session_key, messages)
+    clear_provider_override()  # Reset provider after completion
     log.info("[perf] sync | prep=%.0fms | llm=%.0fms | tools=%d | total=%.0fms (max_iter)",
              t_prep, t_llm_total, tool_count, (_time.monotonic() - t0) * 1000)
     return "Processing timed out, please try again later."

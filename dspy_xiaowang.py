@@ -492,6 +492,219 @@ class Handler(BaseHTTPRequestHandler):
                 _send_json(400 if isinstance(e, ValueError) else 500, {"error": str(e)})
             return
 
+        # Handle /api/parse/pdf - extract text from PDF and return it
+        if self.path == "/api/parse/pdf":
+            def _send_json(status, payload):
+                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            try:
+                content_type = self.headers.get("Content-Type", "")
+                boundary = None
+                for part in content_type.split(";"):
+                    part = part.strip()
+                    if part.startswith("boundary="):
+                        boundary = part[9:].strip('"')
+                        break
+
+                if not boundary:
+                    _send_json(400, {"success": False, "error": "No boundary"})
+                    return
+
+                boundary_bytes = f"--{boundary}".encode()
+                parts = body.split(boundary_bytes)
+                file_content = None
+                filename = "file.pdf"
+
+                for part in parts[1:]:
+                    if b"\r\n\r\n" in part:
+                        headers_raw, content = part.split(b"\r\n\r\n", 1)
+                        headers_text = headers_raw.decode("utf-8", errors="ignore")
+                        if 'name="file"' in headers_text:
+                            for line in headers_text.split("\r\n"):
+                                if "filename=" in line:
+                                    for seg in line.split(";"):
+                                        seg = seg.strip()
+                                        if seg.startswith("filename="):
+                                            filename = seg[9:].strip('"')
+                            file_content = content.rstrip(b"\r\n")
+
+                if not file_content:
+                    _send_json(400, {"success": False, "error": "No file provided"})
+                    return
+
+                import tempfile, os
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                    tmp.write(file_content)
+                    tmp_path = tmp.name
+
+                try:
+                    from dspy_agent.tools import _extract_pdf_text
+                    text = _extract_pdf_text(tmp_path)
+                    _send_json(200, {"success": True, "text": text, "filename": filename})
+                finally:
+                    os.unlink(tmp_path)
+
+            except Exception as e:
+                log.error(f"[api/parse/pdf] error: {e}", exc_info=True)
+                _send_json(500, {"success": False, "error": str(e)})
+            return
+
+        # Handle /api/upload - upload file from URL
+        if self.path == "/api/upload":
+            def _send_json(status, payload):
+                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            try:
+                data = json.loads(body.decode("utf-8"))
+                url = data.get("url", "")
+                filename = data.get("filename")
+
+                if not url:
+                    _send_json(400, {"success": False, "error": "URL is required"})
+                    return
+
+                # Use the upload_file tool
+                from dspy_agent.tools import upload_file
+                result = upload_file(url=url, filename=filename, workspace=WORKSPACE)
+
+                if result.startswith("[error]"):
+                    _send_json(400, {"success": False, "error": result[8:]})
+                else:
+                    # Parse result for path, type, size
+                    lines = result.split("\n")
+                    path = lines[0].replace("File uploaded: ", "") if lines else ""
+                    type_info = ""
+                    size_info = ""
+                    for line in lines[1:]:
+                        if line.startswith("Type:"):
+                            type_info = line.replace("Type: ", "")
+                        if line.startswith("Size:"):
+                            size_info = line.replace("Size: ", "")
+
+                    _send_json(200, {
+                        "success": True,
+                        "path": path,
+                        "type": type_info,
+                        "size": size_info
+                    })
+            except Exception as e:
+                log.error(f"[api/upload] error: {e}", exc_info=True)
+                _send_json(500, {"success": False, "error": str(e)})
+            return
+
+        # Handle /api/upload/file - upload file directly
+        if self.path == "/api/upload/file":
+            def _send_json(status, payload):
+                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            try:
+                content_type = self.headers.get("Content-Type", "")
+                if "multipart/form-data" not in content_type:
+                    _send_json(400, {"success": False, "error": "Expected multipart/form-data"})
+                    return
+
+                # Extract boundary from content-type
+                boundary = None
+                for part in content_type.split(";"):
+                    part = part.strip()
+                    if part.startswith("boundary="):
+                        boundary = part[9:].strip('"')
+                        break
+
+                if not boundary:
+                    _send_json(400, {"success": False, "error": "No boundary in content-type"})
+                    return
+
+                # Read and parse multipart data
+                from pathlib import Path
+                boundary_bytes = f"--{boundary}".encode()
+                end_boundary = f"--{boundary}--".encode()
+                body_parts = body.split(boundary_bytes)
+
+                filename = None
+                file_content = None
+                custom_filename = None
+
+                for part in body_parts[1:]:  # Skip first empty part
+                    if part.startswith(end_boundary) or part == b"--\r\n":
+                        continue
+
+                    # Split headers and content
+                    if b"\r\n\r\n" in part:
+                        headers_raw, content = part.split(b"\r\n\r\n", 1)
+                        headers_text = headers_raw.decode("utf-8", errors="ignore")
+
+                        # Check if this is the file field
+                        if 'name="file"' in headers_text:
+                            # Extract filename from Content-Disposition
+                            for line in headers_text.split("\r\n"):
+                                if "filename=" in line:
+                                    for seg in line.split(";"):
+                                        seg = seg.strip()
+                                        if seg.startswith("filename="):
+                                            filename = seg[9:].strip('"')
+                                            break
+
+                            # Remove trailing boundary markers
+                            file_content = content.rstrip(b"\r\n")
+                            if file_content.endswith(end_boundary):
+                                file_content = file_content[:-len(end_boundary)].rstrip(b"\r\n")
+
+                        # Check for custom filename field
+                        elif 'name="filename"' in headers_text:
+                            custom_filename = content.decode("utf-8").strip()
+                            if custom_filename.endswith("--"):
+                                custom_filename = custom_filename[:-2].strip()
+
+                if not file_content:
+                    _send_json(400, {"success": False, "error": "No file provided"})
+                    return
+
+                # Use custom filename if provided
+                final_filename = custom_filename or filename
+                if not final_filename:
+                    _send_json(400, {"success": False, "error": "No filename provided"})
+                    return
+
+                # Save file to workspace
+                file_path = Path(WORKSPACE) / final_filename
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+
+                with open(file_path, "wb") as f:
+                    f.write(file_content)
+
+                file_size = file_path.stat().st_size
+                log.info(f"[api/upload/file] saved: {file_path} ({file_size} bytes)")
+
+                _send_json(200, {
+                    "success": True,
+                    "path": str(file_path),
+                    "type": "application/octet-stream",
+                    "size": f"{file_size} bytes"
+                })
+            except Exception as e:
+                log.error(f"[api/upload/file] error: {e}", exc_info=True)
+                _send_json(500, {"success": False, "error": str(e)})
+            return
+
         # Handle other POST requests
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")

@@ -17,10 +17,22 @@ echo "  Port: $PORT"
 echo "  API: http://localhost:$PORT/v1"
 echo ""
 
+# Optimization: Check port availability and cooldown before starting
+if lsof -i :$PORT > /dev/null 2>&1; then
+    echo "[WARN] Port $PORT already in use. Killing old server..."
+    lsof -t -i :$PORT | xargs kill -9 > /dev/null 2>&1 || true
+    sleep 2
+fi
+
 # Set environment variable for dspy-office to use local MLX model
 export DSPY_MODEL=local-mlx
 
+# Optimization: Give LSP some breathing room before launching resource-intensive model
+echo "[INFO] Waiting for system stabilization (3s)..."
+sleep 3
+
 # mlx-vlm server (OpenAI-compatible API)
+echo "Launching MLX VLM Server..."
 python -m mlx_vlm.server \
     --model "$MODEL" \
     --port $PORT
