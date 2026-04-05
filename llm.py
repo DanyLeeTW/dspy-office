@@ -75,15 +75,46 @@ def _check_for_pdf_in_goal(goal: str) -> bool:
     return bool(re.search(r'^---\s+.*\.pdf\s+---', goal, re.IGNORECASE | re.MULTILINE))
 
 
+def _trim_messages(messages, context_window, max_tokens):
+    """Drop oldest non-system messages until estimated token count fits context_window.
+
+    Budget: context_window - max_tokens (output) - 2048 (tool defs overhead).
+    Uses character count / 3.5 as a fast token estimate (good enough for trimming).
+    """
+    budget = context_window - max_tokens - 2048
+    if budget <= 0:
+        return messages
+
+    system = [m for m in messages if m.get("role") == "system"]
+    rest = [m for m in messages if m.get("role") != "system"]
+
+    def _char_count(msgs):
+        return sum(len(str(m.get("content", ""))) for m in msgs)
+
+    # Keep trimming oldest non-system messages until we fit
+    while rest and _char_count(system + rest) / 3.5 > budget:
+        rest.pop(0)
+        # Never leave a dangling tool result at the start
+        while rest and rest[0].get("role") == "tool":
+            rest.pop(0)
+
+    return system + rest
+
+
 def _call_llm(messages, tool_defs):
     provider = _get_provider()
     url = provider["api_base"].rstrip("/") + "/chat/completions"
+
+    max_tokens = provider.get("max_tokens", 8192)
+    context_window = provider.get("context_window")
+    if context_window:
+        messages = _trim_messages(messages, context_window, max_tokens)
 
     body = {
         "model": provider["model"],
         "messages": messages,
         "tools": tool_defs,
-        "max_tokens": provider.get("max_tokens", 8192),
+        "max_tokens": max_tokens,
     }
     extra = provider.get("extra_body", {})
     body.update(extra)

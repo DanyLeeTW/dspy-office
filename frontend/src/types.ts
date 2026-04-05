@@ -19,6 +19,7 @@ export interface AgentStep {
   content: string;
   toolCall?: ToolCall;
   status: 'pending' | 'running' | 'complete' | 'error';
+  timestamp?: number;
 }
 
 export interface MemoryItem {

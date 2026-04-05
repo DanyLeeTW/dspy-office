@@ -3,112 +3,138 @@ Memory System - Three-Stage Pipeline
 
 1. Compress: conversation -> LLM extracts structured memories (key facts + people + time + keywords)
 2. Deduplicate: new memory vs existing memories cosine similarity, >threshold skip
-3. Retrieve: user message -> embedding -> LanceDB vector search -> return relevant memories
+3. Retrieve: user message -> embedding -> ChromaDB vector search -> return relevant memories
 
-Storage: LanceDB (embedded, file-level, no standalone service)
-Vectorization: Any OpenAI-compatible embedding API (1024 dimensions)
+Storage: ChromaDB (embedded, persistent, no standalone service)
+Vectorization: Local BAAI/bge-large-zh via sentence-transformers (1024 dimensions)
+
+Performance:
+- Pre-fetch: call prefetch(text) when message arrives (e.g. during debounce) to embed in background
+- Embedding cache: TTL-based cache avoids re-embedding identical queries
+- Thread pool: reuses threads instead of spawning new ones per request
 """
 
 import json
 import logging
-import os
 import threading
 import time
 import urllib.request
 import uuid
-from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor, Future
+from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger("agent")
-CST = timezone(timedelta(hours=8))
 
 # ============================================================
 #  Module State
 # ============================================================
 
-_config = {}        # memory config section
-_llm_config = {}    # models config (used for calling LLM during compression)
-_db = None          # LanceDB connection
-_table = None       # LanceDB memories table
+_config = {}         # memory config section
+_llm_config = {}     # models config (used for calling LLM during compression)
+_collection = None   # ChromaDB collection
 _enabled = False
-_context_cache = {} # session_key -> str (pre-computed memory summary, for zero-latency hardware channels)
+_embed_model = None  # sentence-transformers BAAI/bge-large-zh
+
+EMBED_DIMENSION = 1024  # bge-large-zh output dimension
+
+# Embedding pre-fetch / cache
+_embed_cache: Dict[str, Tuple[List[float], float]] = {}  # text -> (vector, expiry)
+_embed_futures: Dict[str, Future] = {}                   # text -> in-flight Future
+_embed_lock = threading.Lock()
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mem")
+
+EMBED_CACHE_TTL = 120   # seconds to keep a cached vector
+EMBED_CACHE_MAX = 256   # max entries to prevent unbounded growth
+MIN_RETRIEVE_LEN = 8    # skip memory lookup for very short messages
+
 
 # ============================================================
-#  Public API (4 functions)
+#  Public API
 # ============================================================
 
 
 def init(config, llm_config, db_path):
-    """Initialize LanceDB connection + embedding config. Called once at startup."""
-    global _config, _llm_config, _db, _table, _enabled
+    """Initialize ChromaDB + local bge-large-zh model. Called once at startup."""
+    global _config, _llm_config, _collection, _enabled, _embed_model
 
     mem_cfg = config.get("memory", {})
     if not mem_cfg.get("enabled", False):
         log.info("[memory] disabled in config")
         return
 
-    embedding_cfg = mem_cfg.get("embedding_api", {})
-    if not embedding_cfg.get("api_key"):
-        log.error("[memory] no embedding API key, disabled")
-        return
-
     _config = mem_cfg
     _llm_config = llm_config
 
     try:
-        import lancedb
-        _db = lancedb.connect(db_path)
-        # Open or create table
-        try:
-            _table = _db.open_table("memories")
-            count = _table.count_rows()
-            log.info("[memory] opened table, %d memories" % count)
-        except Exception:
-            # Table doesn't exist, insert seed data to create schema
-            import numpy as np
-            seed = [{
-                "id": "seed",
-                "fact": "System initialized",
-                "keywords": "[]",
-                "persons": "[]",
-                "timestamp": "",
-                "topic": "system",
-                "session_key": "init",
-                "created_at": time.time(),
-                "vector": np.zeros(1024).tolist(),
-            }]
-            _table = _db.create_table("memories", seed)
-            log.info("[memory] created new table")
+        from sentence_transformers import SentenceTransformer
+        _embed_model = SentenceTransformer("BAAI/bge-large-zh")
+        log.info("[memory] loaded BAAI/bge-large-zh embedding model")
+    except Exception as e:
+        log.error("[memory] failed to load embedding model: %s" % e)
+        return
 
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=db_path)
+        # cosine space: distance = 1 - cosine_similarity (lower = more similar)
+        _collection = client.get_or_create_collection(
+            name="memories",
+            metadata={"hnsw:space": "cosine"},
+        )
+        log.info("[memory] ChromaDB ready, %d memories — db_path=%s" % (_collection.count(), db_path))
         _enabled = True
-        log.info("[memory] initialized, db_path=%s" % db_path)
     except Exception as e:
         log.error("[memory] init failed: %s" % e, exc_info=True)
 
 
-def retrieve(user_msg, session_key, top_k=None):
-    """Retrieve relevant memories, return formatted text block. Synchronous."""
-    if not _enabled or not _table:
+def prefetch(text: str) -> None:
+    """
+    Start embedding text in background. Call this as early as possible
+    (e.g. when a message arrives, before debounce fires) so the vector
+    is ready by the time retrieve() is called.
+    """
+    if not _enabled or not text or len(text.strip()) < MIN_RETRIEVE_LEN:
+        return
+
+    with _embed_lock:
+        entry = _embed_cache.get(text)
+        if entry and entry[1] > time.time():
+            return
+        if text in _embed_futures and not _embed_futures[text].done():
+            return
+
+        future = _executor.submit(_embed_single, text)
+        _embed_futures[text] = future
+
+
+def retrieve(user_msg: str, _session_key: str = "", top_k: Optional[int] = None) -> str:
+    """Retrieve relevant memories, return formatted text block."""
+    if not _enabled or not _collection:
+        return ""
+    if not user_msg or len(user_msg.strip()) < MIN_RETRIEVE_LEN:
         return ""
     if top_k is None:
         top_k = _config.get("retrieve_top_k", 5)
 
-    try:
-        query_vec = _embed([user_msg])
-        if not query_vec:
-            return ""
-        results = _table.search(query_vec[0]).limit(top_k).to_list()
-        if not results:
-            return ""
+    query_vec = _get_vector(user_msg)
+    if not query_vec:
+        return ""
 
-        # Filter out seed data and low-quality results
-        filtered = [r for r in results if r.get("id") != "seed" and r.get("fact", "") != "System initialized"]
-        if not filtered:
+    try:
+        results = _collection.query(
+            query_embeddings=[query_vec],
+            n_results=min(top_k, _collection.count()),
+            include=["documents", "metadatas"],
+        )
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        if not docs:
             return ""
 
         lines = ["[Relevant Memories]"]
-        for r in filtered:
-            line = "- " + r["fact"]
-            ts = r.get("timestamp", "")
+        for fact, meta in zip(docs, metas):
+            line = "- " + fact
+            ts = (meta or {}).get("timestamp", "")
             if ts:
                 line += " (%s)" % ts
             lines.append(line)
@@ -122,7 +148,6 @@ def compress_async(evicted_messages, session_key):
     """Start background thread to compress evicted messages into long-term memory."""
     if not _enabled:
         return
-    # Filter: keep only user and assistant text messages
     msgs = []
     for m in evicted_messages:
         role = m.get("role", "")
@@ -131,102 +156,81 @@ def compress_async(evicted_messages, session_key):
         content = m.get("content", "")
         if not content or not isinstance(content, str):
             continue
-        # Skip assistant messages that only have tool_calls (no content)
         if role == "assistant" and m.get("tool_calls"):
             continue
         msgs.append(m)
 
     if len(msgs) < 2:
-        # Too few messages, not worth compressing
         return
 
-    t = threading.Thread(target=_compress_worker, args=(msgs, session_key), daemon=True)
-    t.start()
-    log.info("[memory] compress started in background (%d messages)" % len(msgs))
-
-
-def get_cached_context(session_key):
-    """Zero-latency: return pre-computed memory summary. For hardware/voice channels."""
-    return _context_cache.get(session_key, "")
+    _executor.submit(_compress_worker, msgs, session_key)
+    log.info("[memory] compress queued (%d messages)" % len(msgs))
 
 
 # ============================================================
-#  Embedding (OpenAI-compatible API)
+#  Internal: vector helpers
 # ============================================================
 
 
-def _embed(texts):
-    """Call embedding API, return list of vectors. Supports OpenAI and Gemini APIs."""
-    if not texts:
+def _get_vector(text: str) -> Optional[List[float]]:
+    """Return embedding vector, using cache/pre-fetch when available."""
+    now = time.time()
+
+    with _embed_lock:
+        entry = _embed_cache.get(text)
+        if entry and entry[1] > now:
+            return entry[0]
+        future = _embed_futures.get(text)
+
+    if future and not future.done():
+        try:
+            return future.result(timeout=6)
+        except Exception:
+            pass
+
+    return _embed_single(text)
+
+
+def _embed_single(text: str) -> Optional[List[float]]:
+    """Embed a single text, store result in cache."""
+    try:
+        vecs = _embed([text])
+        if not vecs:
+            return None
+        vec = vecs[0]
+        _cache_put(text, vec)
+        return vec
+    except Exception as e:
+        log.error("[memory] embed error: %s" % e)
+        return None
+
+
+def _cache_put(text: str, vec: List[float]) -> None:
+    """Store vector in cache, evict oldest entries if over limit."""
+    with _embed_lock:
+        _embed_futures.pop(text, None)
+        if len(_embed_cache) >= EMBED_CACHE_MAX:
+            oldest = sorted(_embed_cache.items(), key=lambda x: x[1][1])[:32]
+            for k, _ in oldest:
+                del _embed_cache[k]
+        _embed_cache[text] = (vec, time.time() + EMBED_CACHE_TTL)
+
+
+# ============================================================
+#  Embedding (local BAAI/bge-large-zh via sentence-transformers)
+# ============================================================
+
+
+def _embed(texts: List[str]) -> List[List[float]]:
+    """Embed texts using local BAAI/bge-large-zh model."""
+    if not texts or _embed_model is None:
         return []
-
-    cfg = _config.get("embedding_api", {})
-    api_base = cfg.get("api_base", "https://api.example.com/v1")
-    api_key = cfg.get("api_key", "")
-    model = cfg.get("model", "text-embedding-3-small")
-    dimension = cfg.get("dimension", 1024)
-
-    # Detect Gemini API
-    is_gemini = "generativelanguage.googleapis.com" in api_base.lower()
-
-    if is_gemini:
-        # Gemini API format
-        # POST /models/{model}:batchEmbedContents
-        url = api_base.rstrip("/") + f"/models/{model}:batchEmbedContents"
-
-        # Build Gemini request body
-        requests_list = []
-        for text in texts:
-            requests_list.append({
-                "model": f"models/{model}",
-                "content": {
-                    "parts": [{"text": text}]
-                }
-            })
-
-        body = json.dumps({"requests": requests_list}).encode("utf-8")
-
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": api_key,
-            },
-        )
-
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-
-        # Gemini response format: {"embeddings": [{"values": [...]}, ...]}
-        embeddings = data.get("embeddings", [])
-        return [emb.get("values", []) for emb in embeddings]
-
-    else:
-        # OpenAI-compatible format
-        body = json.dumps({
-            "model": model,
-            "input": texts,
-            "dimensions": dimension,
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            api_base.rstrip("/") + "/embeddings",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + api_key,
-            },
-        )
-
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-
-        return [item["embedding"] for item in data["data"]]
+    vecs = _embed_model.encode(texts, normalize_embeddings=True)
+    return vecs.tolist()
 
 
 # ============================================================
-#  Compression (Three-Stage Core)
+#  Compression
 # ============================================================
 
 COMPRESS_PROMPT = """You are a memory compressor. Extract structured memories from the following conversation.
@@ -253,7 +257,6 @@ Rules:
 
 
 def _format_messages(messages):
-    """Format message list into conversation text"""
     lines = []
     for m in messages:
         role = "User" if m["role"] == "user" else "Assistant"
@@ -264,9 +267,7 @@ def _format_messages(messages):
 
 
 def _call_compress_llm(prompt):
-    """Use LLM to extract structured memories. Prefer cheaper models for compression."""
     providers = _llm_config.get("providers", {})
-    # Prefer a cheap model for compression (avoids compatibility issues with thinking models)
     provider = providers.get("deepseek-chat") or providers.get(_llm_config.get("default", ""))
     if not provider:
         log.error("[memory] no LLM provider for compress")
@@ -279,36 +280,27 @@ def _call_compress_llm(prompt):
         "max_tokens": 4096,
     }, ensure_ascii=False).encode("utf-8")
 
-    headers = {
+    req = urllib.request.Request(url, data=body, headers={
         "Content-Type": "application/json",
         "Authorization": "Bearer " + provider["api_key"],
-    }
-
-    req = urllib.request.Request(url, data=body, headers=headers)
-    timeout = provider.get("timeout", 120)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    })
+    with urllib.request.urlopen(req, timeout=provider.get("timeout", 120)) as resp:
         data = json.loads(resp.read())
 
     content = data["choices"][0]["message"].get("content", "")
     if not content:
         return []
 
-    # Extract JSON array from content
-    # LLM may wrap in ```json, need to clean
     text = content.strip()
     if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines)
+        text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```"))
 
     try:
         result = json.loads(text)
         if isinstance(result, list):
             return result
     except json.JSONDecodeError:
-        # Try finding content between [ and ]
-        start = text.find("[")
-        end = text.rfind("]")
+        start, end = text.find("["), text.rfind("]")
         if start >= 0 and end > start:
             try:
                 return json.loads(text[start:end + 1])
@@ -319,80 +311,86 @@ def _call_compress_llm(prompt):
     return []
 
 
-def _cosine_similarity(a, b):
-    """Compute cosine similarity between two vectors"""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0
-    return dot / (norm_a * norm_b)
+_NULL_TS = {"null", "none", "n/a", "", "undefined"}
+
+def _clean_ts(value) -> str:
+    """Normalize LLM-returned timestamp: reject null-like strings, keep real values."""
+    if not value:
+        return ""
+    s = str(value).strip()
+    return "" if s.lower() in _NULL_TS else s
 
 
 def _compress_worker(messages, session_key):
-    """Background thread: LLM extract -> embed -> deduplicate -> store in LanceDB"""
+    """Background: LLM extract -> embed -> deduplicate -> store in ChromaDB"""
     try:
         dialogue = _format_messages(messages)
         if len(dialogue) < 20:
-            log.info("[memory] dialogue too short, skip compress")
             return
 
-        # 1. LLM structured extraction
-        prompt = COMPRESS_PROMPT.format(dialogue=dialogue)
-        memories = _call_compress_llm(prompt)
+        memories = _call_compress_llm(COMPRESS_PROMPT.format(dialogue=dialogue))
         if not memories:
             log.info("[memory] no memories extracted from %d messages" % len(messages))
             return
 
         log.info("[memory] extracted %d memories" % len(memories))
 
-        # 2. Vectorize facts
         facts = [m.get("fact", "") for m in memories if m.get("fact")]
         if not facts:
             return
+
         embeddings = _embed(facts)
         if len(embeddings) != len(facts):
-            log.error("[memory] embedding count mismatch: %d facts vs %d embeddings" % (len(facts), len(embeddings)))
+            log.error("[memory] embedding count mismatch")
             return
 
-        # 3. Deduplicate: cosine similarity against existing memories
         threshold = _config.get("similarity_threshold", 0.92)
-        new_records = []
-        for i, (mem, vec) in enumerate(zip(memories, embeddings)):
+        # cosine distance = 1 - similarity, so distance threshold = 1 - sim_threshold
+        dist_threshold = 1.0 - threshold
+
+        ids, vecs, docs, metas = [], [], [], []
+        total = _collection.count()
+
+        for mem, vec in zip(memories, embeddings):
             fact = mem.get("fact", "")
             if not fact:
                 continue
 
-            # Check if duplicate of existing memory
-            try:
-                existing = _table.search(vec).limit(1).to_list()
-                if existing and existing[0].get("id") != "seed":
-                    sim = 1 - existing[0].get("_distance", 1)
-                    if sim > threshold:
+            # Deduplicate via cosine distance (only when collection has entries)
+            if total > 0:
+                try:
+                    existing = _collection.query(
+                        query_embeddings=[vec],
+                        n_results=1,
+                        include=["distances"],
+                    )
+                    distances = existing.get("distances", [[]])[0]
+                    if distances and distances[0] < dist_threshold:
+                        sim = 1.0 - distances[0]
                         log.info("[memory] skip duplicate (sim=%.3f): %s" % (sim, fact[:50]))
                         continue
-            except Exception:
-                pass  # Search failure shouldn't block storage
+                except Exception:
+                    pass
 
-            new_records.append({
-                "id": str(uuid.uuid4()),
-                "fact": fact,
+            ids.append(str(uuid.uuid4()))
+            vecs.append(vec)
+            docs.append(fact)
+            metas.append({
                 "keywords": json.dumps(mem.get("keywords", []), ensure_ascii=False),
                 "persons": json.dumps(mem.get("persons", []), ensure_ascii=False),
-                "timestamp": mem.get("timestamp") or "",
+                "timestamp": _clean_ts(mem.get("timestamp")),
                 "topic": mem.get("topic", ""),
                 "session_key": session_key,
                 "created_at": time.time(),
-                "vector": vec,
             })
 
-        # 4. Store in LanceDB
-        if new_records:
-            _table.add(new_records)
+        if ids:
+            _collection.add(ids=ids, embeddings=vecs, documents=docs, metadatas=metas)
+            total += len(ids)
             log.info("[memory] stored %d new memories (skipped %d duplicates)" % (
-                len(new_records), len(facts) - len(new_records)))
+                len(ids), len(facts) - len(ids)))
         else:
-            log.info("[memory] all %d memories were duplicates, nothing stored" % len(facts))
+            log.info("[memory] all %d memories were duplicates" % len(facts))
 
     except Exception as e:
         log.error("[memory] compress error: %s" % e, exc_info=True)

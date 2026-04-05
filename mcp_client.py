@@ -14,8 +14,10 @@ Usage (called by tools.py):
 import json
 import logging
 import os
+import select
 import subprocess
 import threading
+import time
 import urllib.request
 
 log = logging.getLogger("agent")
@@ -111,58 +113,52 @@ class MCPServer:
             return self._http_request(msg)
 
     def _stdio_request(self, msg):
-        """stdio transport: write JSON+newline to stdin, read response from stdout"""
+        """stdio transport: write JSON+newline to stdin, read response from stdout.
+
+        Uses select() instead of a thread-per-request to avoid OS thread spawn overhead.
+        Matches response by request ID so MCP notifications are skipped, not mistaken
+        for the real reply.
+        """
         with self._lock:
             if not self._proc or self._proc.poll() is not None:
                 raise ConnectionError("MCP server %s process not running" % self.name)
 
-            line = json.dumps(msg) + "\n"
-            self._proc.stdin.write(line.encode())
+            self._proc.stdin.write((json.dumps(msg) + "\n").encode())
             self._proc.stdin.flush()
 
-            # Read response, skip non-JSON lines (npm/npx warnings, etc)
-            result_holder = [None]
-            error_holder = [None]
+            expected_id = msg.get("id")
+            deadline = time.monotonic() + 30
 
-            def _read():
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("MCP server %s: request timed out (30s)" % self.name)
+
+                ready, _, _ = select.select([self._proc.stdout], [], [], remaining)
+                if not ready:
+                    raise TimeoutError("MCP server %s: request timed out (30s)" % self.name)
+
+                raw = self._proc.stdout.readline()
+                if not raw:
+                    raise ConnectionError("MCP server %s: stdout EOF" % self.name)
+                raw = raw.strip()
+                if not raw:
+                    continue
+
                 try:
-                    while True:
-                        raw = self._proc.stdout.readline()
-                        if not raw:
-                            error_holder[0] = ConnectionError(
-                                "MCP server %s: stdout EOF" % self.name)
-                            return
-                        raw = raw.strip()
-                        if not raw:
-                            continue
-                        try:
-                            resp = json.loads(raw)
-                            result_holder[0] = resp
-                            return
-                        except json.JSONDecodeError:
-                            # Skip non-JSON lines (npm warnings etc)
-                            continue
-                except Exception as e:
-                    error_holder[0] = e
+                    resp = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue  # skip non-JSON lines (startup banners, npm warnings)
 
-            reader = threading.Thread(target=_read, daemon=True)
-            reader.start()
-            reader.join(timeout=30)
+                # Skip notifications — they have no "id" field
+                if resp.get("id") != expected_id:
+                    continue
 
-            if reader.is_alive():
-                raise TimeoutError(
-                    "MCP server %s: request timed out (30s)" % self.name)
-            if error_holder[0]:
-                raise error_holder[0]
-
-            resp = result_holder[0]
-            if resp is None:
-                raise ConnectionError("MCP server %s: no response" % self.name)
-            if "error" in resp:
-                err = resp["error"]
-                raise RuntimeError("MCP server %s: %s (code=%s)" % (
-                    self.name, err.get("message", ""), err.get("code", "?")))
-            return resp.get("result")
+                if "error" in resp:
+                    err = resp["error"]
+                    raise RuntimeError("MCP server %s: %s (code=%s)" % (
+                        self.name, err.get("message", ""), err.get("code", "?")))
+                return resp.get("result")
 
     def _http_request(self, msg):
         """HTTP transport: POST JSON-RPC to server URL"""

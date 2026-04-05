@@ -78,7 +78,7 @@ import llm
 llm.init(CONFIG["models"], WORKSPACE, next(iter(OWNER_IDS), ""), SESSIONS_DIR)
 
 # Initialize session manager
-session_manager = SessionManager(SESSIONS_DIR)
+session_manager = SessionManager(SESSIONS_DIR, max_messages=CONFIG.get("max_session_messages", 40))
 
 # Initialize memory system
 import memory as mem_mod
@@ -102,9 +102,8 @@ if OPTIMIZED_PATH and os.path.exists(OPTIMIZED_PATH):
 else:
     agent = CompleteAgent(
         tools=get_all_tools(),
-        retrieve_fn=None,  # Disable memory retrieval temporarily
+        retrieve_fn=mem_mod.retrieve,
         max_iters=20,
-        use_chain_of_thought=False  # Disable for GLM-5 compatibility
     )
 
 # Set scheduler chat function
@@ -206,6 +205,9 @@ def _debounce_flush(sender_id):
 
 
 def debounce_message(sender_id, text, images=None):
+    # Start embedding immediately so it's ready by the time the debounce fires
+    mem_mod.prefetch(text)
+
     with _debounce_lock:
         frag = {"text": text, "images": images or []}
         _debounce_buffers.setdefault(sender_id, []).append(frag)
@@ -390,8 +392,11 @@ class Handler(BaseHTTPRequestHandler):
 
                     reply = ''
                     try:
+                        import time
+                        t0 = time.time()
                         # Emit thinking event
                         _send_sse_event("thinking", {"content": "Processing request..."})
+                        log.info(f"[stream] thinking event sent, elapsed={time.time()-t0:.2f}s")
 
                         # Define callbacks for streaming
                         def on_tool_start(tool_name, args):
@@ -421,6 +426,7 @@ class Handler(BaseHTTPRequestHandler):
                             conversation_history=history,
                             session_key=session_key
                         )
+                        log.info(f"[stream] agent completed, elapsed={time.time()-t0:.2f}s")
                         reply = result.response
                         memory_context = result.memory_context if hasattr(result, 'memory_context') else ''
 
@@ -431,6 +437,7 @@ class Handler(BaseHTTPRequestHandler):
                         })
 
                         _send_sse_event("done", {})
+                        log.info(f"[stream] total time={time.time()-t0:.2f}s")
 
                     except Exception as agent_error:
                         log.warning(f"[api/chat/stream] Agent error: {agent_error}", exc_info=True)

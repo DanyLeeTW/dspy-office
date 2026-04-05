@@ -35,6 +35,7 @@ export function useAgentRunner() {
   const [tools, setTools] = useState<Tool[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [currentGoal, setCurrentGoal] = useState('');
+  const [goalTimestamp, setGoalTimestamp] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Load MCP servers on mount
@@ -67,6 +68,7 @@ export function useAgentRunner() {
     });
     setIsRunning(false);
     setCurrentGoal('');
+    setGoalTimestamp(null);
     setError(null);
   }, []);
 
@@ -86,6 +88,7 @@ export function useAgentRunner() {
 
     // 初始化 UI 狀態
     setCurrentGoal(goal);
+    setGoalTimestamp(Date.now());
     setIsRunning(true);
     setSteps([]);
     // Reset tools to idle state
@@ -154,6 +157,7 @@ export function useAgentRunner() {
     tools,
     isRunning,
     currentGoal,
+    goalTimestamp,
     error,
     run,
     reset,

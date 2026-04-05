@@ -6,7 +6,7 @@ import { MemoryPanel } from './components/MemoryPanel';
 import { useAgentRunner } from './hooks/useAgentRunner';
 
 function App() {
-  const { steps, memories, tools, isRunning, currentGoal, run, reset } = useAgentRunner();
+  const { steps, memories, tools, isRunning, currentGoal, goalTimestamp, run, reset } = useAgentRunner();
   const [showToolCallResult, setShowToolCallResult] = useState(true);
   const totalUsage = tools.reduce((sum, t) => sum + t.usageCount, 0);
   const activeTools = tools.filter(t => t.status === 'active').length;
@@ -68,7 +68,7 @@ function App() {
             </label>
           </div>
 
-          <Scratchpad steps={steps} currentGoal={currentGoal} showToolCallResult={showToolCallResult} />
+          <Scratchpad steps={steps} currentGoal={currentGoal} goalTimestamp={goalTimestamp} showToolCallResult={showToolCallResult} />
         </main>
       </div>
     </div>

@@ -81,7 +81,8 @@ export async function runAgent(
                 id: generateStepId('thinking'),
                 type: 'thinking',
                 content: data.content,
-                status: 'running'
+                status: 'running',
+                timestamp: Date.now()
               });
               break;
 
@@ -100,7 +101,8 @@ export async function runAgent(
                   args: data.args || {},
                   status: 'running'
                 },
-                status: 'running'
+                status: 'running',
+                timestamp: Date.now()
               });
               break;
 
@@ -121,7 +123,8 @@ export async function runAgent(
                   result: data.result,
                   status: 'complete'
                 },
-                status: 'complete'
+                status: 'complete',
+                timestamp: Date.now()
               });
               break;
 
@@ -131,7 +134,8 @@ export async function runAgent(
                 id: generateStepId('result'),
                 type: 'result',
                 content: data.content,
-                status: 'complete'
+                status: 'complete',
+                timestamp: Date.now()
               });
               break;
 
@@ -140,7 +144,8 @@ export async function runAgent(
                 id: generateStepId('error'),
                 type: 'result',
                 content: `Error: ${data.message}`,
-                status: 'error'
+                status: 'error',
+                timestamp: Date.now()
               });
               callbacks.onError(new Error(data.message));
               break;
@@ -163,7 +168,8 @@ export async function runAgent(
       id: generateStepId('error'),
       type: 'result',
       content: `Error: ${errorMessage}`,
-      status: 'error'
+      status: 'error',
+      timestamp: Date.now()
     });
 
     callbacks.onError(error instanceof Error ? error : new Error(errorMessage));

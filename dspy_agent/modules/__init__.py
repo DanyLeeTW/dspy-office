@@ -28,8 +28,6 @@ from datetime import datetime, timezone, timedelta
 
 from ..signatures import (
     AgentSignature,
-    MemoryRetrievalSignature,
-    MemorySynthesisSignature,
     ScheduledTaskExecutionSignature,
 )
 
@@ -83,6 +81,7 @@ def configure_lm(config: Dict[str, Any]) -> None:
     api_key = provider.get("api_key", "")
     model = provider.get("model", "gpt-4o-mini")
     max_tokens = provider.get("max_tokens", 8192)
+    timeout = provider.get("timeout", 120)
 
     # Construct model string for DSPy
     # DSPy format: "provider/model" where provider can be openai, anthropic, etc.
@@ -95,12 +94,19 @@ def configure_lm(config: Dict[str, Any]) -> None:
         # Generic OpenAI-compatible endpoint
         model_str = f"openai/{model}"
 
-    lm = dspy.LM(
-        model_str,
+    lm_kwargs = dict(
         api_key=api_key,
         api_base=api_base,
         max_tokens=max_tokens,
+        timeout=timeout,
     )
+    context_window = provider.get("context_window")
+    if context_window:
+        # Tells litellm the model's hard limit so it can truncate before sending
+        lm_kwargs["context_window_fallback_dict"] = {model_str: context_window}
+        lm_kwargs["num_retries"] = 0
+
+    lm = dspy.LM(model_str, **lm_kwargs)
 
     dspy.configure(lm=lm)
     log.info(f"[dspy] Configured LM: {model_str} (base: {api_base})")
@@ -290,10 +296,8 @@ class ToolAgent(dspy.Module):
 
     def __init__(
         self,
-        signature: str = "user_request -> response",
-        tools: List[Callable] = None,
+        tools: Optional[List[Callable]] = None,
         max_iters: int = 20,
-        use_chain_of_thought: bool = True
     ):
         super().__init__()
         self.tools = tools or []
@@ -342,57 +346,24 @@ class MemoryModule(dspy.Module):
         # context.memory_context can be injected into Agent
     """
 
-    def __init__(
-        self,
-        retrieve_fn: Callable = None,
-        use_chain_of_thought: bool = True
-    ):
+    def __init__(self, retrieve_fn: Optional[Callable] = None):
         super().__init__()
         self.retrieve_fn = retrieve_fn
 
-        if use_chain_of_thought:
-            self.retrieval = dspy.ChainOfThought(MemoryRetrievalSignature)
-            self.synthesis = dspy.ChainOfThought(MemorySynthesisSignature)
-        else:
-            self.retrieval = dspy.Predict(MemoryRetrievalSignature)
-            self.synthesis = dspy.Predict(MemorySynthesisSignature)
+    def forward(self, query: str, session_key: str = "") -> dspy.Prediction:
+        """Retrieve relevant memories directly using the user query as the search vector."""
+        if not self.retrieve_fn:
+            return dspy.Prediction(memory_context="", search_keywords=[], raw_memories="")
 
-    def forward(
-        self,
-        query: str,
-        conversation_context: str = "",
-        session_key: str = ""
-    ) -> dspy.Prediction:
-        """Retrieve and synthesize relevant memories."""
-
-        # Step 1: Determine search keywords
-        retrieval_result = self.retrieval(
-            query=query,
-            conversation_context=conversation_context
-        )
-
-        # Step 2: Retrieve from vector store
-        if self.retrieve_fn:
-            try:
-                raw_memories = self.retrieve_fn(
-                    " ".join(retrieval_result.search_keywords),
-                    session_key
-                )
-            except Exception as e:
-                log.error(f"[memory] retrieve error: {e}")
-                raw_memories = ""
-        else:
+        try:
+            raw_memories = self.retrieve_fn(query, session_key)
+        except Exception as e:
+            log.error(f"[memory] retrieve error: {e}")
             raw_memories = ""
 
-        # Step 3: Synthesize into context
-        synthesis_result = self.synthesis(
-            user_query=query,
-            retrieved_memories=raw_memories or "No relevant memories found."
-        )
-
         return dspy.Prediction(
-            memory_context=synthesis_result.memory_context,
-            search_keywords=retrieval_result.search_keywords,
+            memory_context=raw_memories,
+            search_keywords=[],
             raw_memories=raw_memories
         )
 
@@ -469,16 +440,15 @@ class CompleteAgent(dspy.Module):
 
     def __init__(
         self,
-        tools: List[Callable] = None,
-        retrieve_fn: Callable = None,
+        tools: Optional[List[Callable]] = None,
+        retrieve_fn: Optional[Callable] = None,
         max_iters: int = 20,
-        use_chain_of_thought: bool = True
     ):
         super().__init__()
 
         self.tools = tools or []
         self.max_iters = max_iters
-        self.memory = MemoryModule(retrieve_fn, use_chain_of_thought)
+        self.memory = MemoryModule(retrieve_fn)
 
         # Build the main agent signature
         class CompleteAgentSignature(dspy.Signature):
@@ -508,11 +478,7 @@ class CompleteAgent(dspy.Module):
         """Process user request with memory and tools."""
 
         # Step 1: Retrieve relevant memories
-        memory_result = self.memory(
-            query=user_request,
-            conversation_context=conversation_history,
-            session_key=session_key
-        )
+        memory_result = self.memory(query=user_request, session_key=session_key)
 
         # Step 2: Generate response with tools
         result = self.agent(
@@ -543,8 +509,8 @@ class StreamingToolAgent(dspy.Module):
 
     def __init__(
         self,
-        tools: List[Callable] = None,
-        retrieve_fn: Callable = None,
+        tools: Optional[List[Callable]] = None,
+        retrieve_fn: Optional[Callable] = None,
         max_iters: int = 20,
         on_tool_start: Optional[Callable[[str, Any], None]] = None,
         on_tool_end: Optional[Callable[[str, Any], None]] = None
@@ -554,7 +520,7 @@ class StreamingToolAgent(dspy.Module):
         self.max_iters = max_iters
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
-        self.memory = MemoryModule(retrieve_fn, use_chain_of_thought=False) if retrieve_fn else None
+        self.memory = MemoryModule(retrieve_fn) if retrieve_fn else None
 
         # Build tool name mapping
         self.tool_map = {t.__name__: t for t in self.tools}
@@ -571,7 +537,7 @@ class StreamingToolAgent(dspy.Module):
         self.react = dspy.ReAct(
             StreamingSignature,
             tools=self._wrap_tools_with_callbacks(),
-            max_iters=max_iters
+            max_iters=min(max_iters, 8)  # Cap at 8 to reduce latency
         )
 
     def _wrap_tools_with_callbacks(self) -> List[Callable]:
@@ -618,11 +584,7 @@ class StreamingToolAgent(dspy.Module):
         # Retrieve memories (if memory module is available)
         memory_context = ""
         if self.memory:
-            memory_result = self.memory(
-                query=user_request,
-                conversation_context=conversation_history,
-                session_key=session_key
-            )
+            memory_result = self.memory(query=user_request, session_key=session_key)
             memory_context = memory_result.memory_context
 
         # Execute with wrapped tools

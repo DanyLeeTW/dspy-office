@@ -49,7 +49,7 @@ messaging.init(config.get('messaging', {}))
 # Step 3: Initialize session manager
 print("[3/6] Initializing session manager...")
 from dspy_agent.modules import SessionManager
-session_manager = SessionManager(SESSIONS_DIR)
+session_manager = SessionManager(SESSIONS_DIR, max_messages=config.get("max_session_messages", 40))
 
 # Step 4: Initialize memory (optional)
 print("[4/6] Initializing memory system...")

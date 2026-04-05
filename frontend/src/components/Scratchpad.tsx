@@ -1,6 +1,16 @@
 import type { AgentStep } from '../types';
 import { useEffect, useRef } from 'react';
 
+function formatTimestamp(ts: number): string {
+  const date = new Date(ts);
+  return date.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+}
+
 function StatusDot({ status }: { status: AgentStep['status'] }) {
   const colors: Record<string, string> = {
     pending: 'bg-status-pending',
@@ -24,10 +34,11 @@ function StepIcon({ type }: { type: AgentStep['type'] }) {
 interface Props {
   steps: AgentStep[];
   currentGoal: string;
+  goalTimestamp?: number | null;
   showToolCallResult?: boolean; // 是否顯示工具調用的結果（默認 true）
 }
 
-export function Scratchpad({ steps, currentGoal, showToolCallResult = true }: Props) {
+export function Scratchpad({ steps, currentGoal, goalTimestamp, showToolCallResult = true }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -50,7 +61,12 @@ export function Scratchpad({ steps, currentGoal, showToolCallResult = true }: Pr
     <div className="flex-1 overflow-y-auto pr-2">
       {currentGoal && (
         <div className="mb-4 p-3 bg-accent/5 border border-accent/20 rounded-lg animate-slide-in">
-          <div className="text-xs text-accent font-semibold uppercase tracking-wider mb-1">Goal</div>
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-xs text-accent font-semibold uppercase tracking-wider">Goal</div>
+            {goalTimestamp && (
+              <div className="text-xs text-text-muted">{formatTimestamp(goalTimestamp)}</div>
+            )}
+          </div>
           <div className="text-text-primary" title={currentGoal}>
             {currentGoal.length > 50 ? currentGoal.slice(0, 50) + '…' : currentGoal}
           </div>
@@ -64,7 +80,12 @@ export function Scratchpad({ steps, currentGoal, showToolCallResult = true }: Pr
                 <StatusDot status={step.status} />
                 <StepIcon type={step.type} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs text-text-muted uppercase tracking-wider mb-1">Thinking</div>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-xs text-text-muted uppercase tracking-wider">Thinking</div>
+                    {step.timestamp && (
+                      <div className="text-xs text-text-muted">{formatTimestamp(step.timestamp)}</div>
+                    )}
+                  </div>
                   <div className="text-sm text-text-secondary italic">{step.content}</div>
                 </div>
               </div>
@@ -74,7 +95,12 @@ export function Scratchpad({ steps, currentGoal, showToolCallResult = true }: Pr
                 <StatusDot status={step.status} />
                 <StepIcon type={step.type} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs text-accent uppercase tracking-wider mb-1">Task Decomposition</div>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-xs text-accent uppercase tracking-wider">Task Decomposition</div>
+                    {step.timestamp && (
+                      <div className="text-xs text-text-muted">{formatTimestamp(step.timestamp)}</div>
+                    )}
+                  </div>
                   <pre className="text-sm text-text-primary whitespace-pre-wrap mono">{step.content}</pre>
                 </div>
               </div>
@@ -93,6 +119,9 @@ export function Scratchpad({ steps, currentGoal, showToolCallResult = true }: Pr
                     }`}>
                       {step.toolCall.status}
                     </span>
+                    {step.timestamp && (
+                      <span className="text-xs text-text-muted ml-auto">{formatTimestamp(step.timestamp)}</span>
+                    )}
                   </div>
                   {showToolCallResult && step.content && (
                     <div className="text-sm text-text-secondary mb-2 bg-surface/50 p-2 rounded">{step.content}</div>
@@ -119,7 +148,12 @@ export function Scratchpad({ steps, currentGoal, showToolCallResult = true }: Pr
                 <StatusDot status={step.status} />
                 <StepIcon type={step.type} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs text-text-muted uppercase tracking-wider mb-2">Result</div>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs text-text-muted uppercase tracking-wider">Result</div>
+                    {step.timestamp && (
+                      <div className="text-xs text-text-muted">{formatTimestamp(step.timestamp)}</div>
+                    )}
+                  </div>
                   <div className="text-sm text-text-primary whitespace-pre-wrap break-words leading-relaxed">{step.content}</div>
                 </div>
               </div>
