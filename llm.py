@@ -75,26 +75,36 @@ def _check_for_pdf_in_goal(goal: str) -> bool:
     return bool(re.search(r'^---\s+.*\.pdf\s+---', goal, re.IGNORECASE | re.MULTILINE))
 
 
-def _trim_messages(messages, context_window, max_tokens):
-    """Drop oldest non-system messages until estimated token count fits context_window.
+def _estimate_tokens(text):
+    """Fast token estimate: chars / 3.5 (conservative, good enough for budget math)."""
+    return int(len(text) / 3.5)
 
-    Budget: context_window - max_tokens (output) - 2048 (tool defs overhead).
-    Uses character count / 3.5 as a fast token estimate (good enough for trimming).
+
+def _trim_messages(messages, context_window, max_tokens, tool_defs=None):
+    """Drop oldest non-system messages until the full request fits in context_window.
+
+    Budget = context_window - max_tokens(output) - tool_defs_tokens - 256(overhead)
+    Measures actual tool JSON size instead of using a fixed 2048 guess.
     """
-    budget = context_window - max_tokens - 2048
+    tool_tokens = _estimate_tokens(json.dumps(tool_defs)) if tool_defs else 0
+    budget = context_window - max_tokens - tool_tokens - 256
     if budget <= 0:
-        return messages
+        log.warning("[llm] tool defs alone (%d tokens) nearly fill context window (%d)",
+                    tool_tokens, context_window)
+        # Keep only system + last user message as a last resort
+        system = [m for m in messages if m.get("role") == "system"]
+        last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+        return system + ([last_user] if last_user else [])
 
     system = [m for m in messages if m.get("role") == "system"]
     rest = [m for m in messages if m.get("role") != "system"]
 
-    def _char_count(msgs):
-        return sum(len(str(m.get("content", ""))) for m in msgs)
+    def _msgs_tokens(msgs):
+        return _estimate_tokens("".join(str(m.get("content", "")) for m in msgs))
 
-    # Keep trimming oldest non-system messages until we fit
-    while rest and _char_count(system + rest) / 3.5 > budget:
+    while rest and _msgs_tokens(system + rest) > budget:
         rest.pop(0)
-        # Never leave a dangling tool result at the start
+        # Never leave a dangling tool result without its assistant call
         while rest and rest[0].get("role") == "tool":
             rest.pop(0)
 
@@ -108,7 +118,7 @@ def _call_llm(messages, tool_defs):
     max_tokens = provider.get("max_tokens", 8192)
     context_window = provider.get("context_window")
     if context_window:
-        messages = _trim_messages(messages, context_window, max_tokens)
+        messages = _trim_messages(messages, context_window, max_tokens, tool_defs)
 
     body = {
         "model": provider["model"],

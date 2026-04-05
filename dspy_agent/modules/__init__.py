@@ -99,12 +99,11 @@ def configure_lm(config: Dict[str, Any]) -> None:
         api_base=api_base,
         max_tokens=max_tokens,
         timeout=timeout,
+        num_retries=0,  # fail fast — retries hide errors and cause silent hangs
     )
     context_window = provider.get("context_window")
     if context_window:
-        # Tells litellm the model's hard limit so it can truncate before sending
         lm_kwargs["context_window_fallback_dict"] = {model_str: context_window}
-        lm_kwargs["num_retries"] = 0
 
     lm = dspy.LM(model_str, **lm_kwargs)
 

@@ -61,7 +61,6 @@ from dspy_agent.utils import configure_from_file, load_optimized_agent
 from dspy_agent.modules import (
     CompleteAgent,
     SessionManager,
-    build_system_prompt,
     format_conversation_history,
 )
 from dspy_agent.tools import registry, get_all_tools
@@ -73,18 +72,21 @@ configure_from_file(CONFIG_PATH)
 import messaging
 messaging.init(CONFIG["messaging"])
 
-# Initialize llm module for fallback
-import llm
-llm.init(CONFIG["models"], WORKSPACE, next(iter(OWNER_IDS), ""), SESSIONS_DIR)
-
 # Initialize session manager
 session_manager = SessionManager(SESSIONS_DIR, max_messages=CONFIG.get("max_session_messages", 40))
 
-# Initialize memory system
+# Initialize memory system in background — bge-large-zh takes ~8s to load.
+# mem_mod._enabled stays False until init completes; requests during warmup
+# simply get empty memory context (graceful degradation).
 import memory as mem_mod
 _mem_db = os.path.join(DATA_DIR, 'memory_db')
 os.makedirs(_mem_db, exist_ok=True)
-mem_mod.init(CONFIG, CONFIG.get('models', {}), _mem_db)
+threading.Thread(
+    target=mem_mod.init,
+    args=(CONFIG, CONFIG.get('models', {}), _mem_db),
+    daemon=True,
+    name="memory-init",
+).start()
 
 # Initialize scheduler
 import scheduler
@@ -378,8 +380,20 @@ class Handler(BaseHTTPRequestHandler):
                 session_key = data.get("session_key", "frontend_session")
                 context = data.get("context", "")
 
-                # Format conversation history
+                # Format conversation history, trimmed to fit context window
                 messages = session_manager.load(session_key)
+                # Hard cap: keep history under 4000 tokens regardless of context_window.
+                # Tools (~3k) + system (~1k) + history (4k) + response (4k) = ~12k,
+                # which keeps a 4B local model responding in seconds not minutes.
+                HISTORY_TOKEN_CAP = 4000
+                trimmed, chars_used = [], 0
+                for m in reversed(messages):
+                    chunk = len(str(m.get("content", "")))
+                    if chars_used + chunk > HISTORY_TOKEN_CAP * 3.5:
+                        break
+                    trimmed.insert(0, m)
+                    chars_used += chunk
+                messages = trimmed
                 history = format_conversation_history(messages)
 
                 # Add context if provided
@@ -477,9 +491,15 @@ class Handler(BaseHTTPRequestHandler):
 
                 except Exception as agent_error:
                     log.warning(f"[api/chat] DSPy agent error, using fallback: {agent_error}")
-                    # Fallback: use simple LLM call without DSPy modules
-                    import llm as llm_mod
-                    reply = llm_mod.chat(msg, session_key)
+                    # Fallback: use a simple ToolAgent without memory
+                    from dspy_agent.modules import ToolAgent
+                    fallback_agent = ToolAgent(tools=get_all_tools(), max_iters=10)
+                    try:
+                        result = fallback_agent(user_request=msg)
+                        reply = result.response
+                    except Exception as fallback_error:
+                        log.error(f"[api/chat] Fallback also failed: {fallback_error}")
+                        reply = f"Sorry, an error occurred: {agent_error}"
                     tool_calls = []
                     memory_context = ''
 
