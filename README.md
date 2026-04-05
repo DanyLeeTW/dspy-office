@@ -159,3 +159,6 @@ See `config.example.json` for the full configuration structure. Key sections:
 ## License
 
 MIT
+
+
+MCP_DEBUG=1 python3.12 dspy_xiaowang.py

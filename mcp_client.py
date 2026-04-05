@@ -4,6 +4,11 @@ MCP Client - Connect to external MCP Servers, register their tools into the agen
 Self-implemented JSON-RPC (no MCP SDK), zero new dependencies.
 MCP protocol only needs 3 methods: initialize, tools/list, tools/call.
 
+Transport Support:
+  - stdio: subprocess with stdin/stdout (serialized, one request at a time)
+  - http: HTTP POST to MCP endpoint (concurrent requests supported)
+  - sse: Server-Sent Events (concurrent requests supported)
+
 Usage (called by tools.py):
   mcp_client.init(config)           # Connect all config["mcp_servers"]
   mcp_client.get_all_tool_defs()    # Return OpenAI function calling format
@@ -19,6 +24,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger("agent")
 
@@ -27,15 +33,26 @@ log = logging.getLogger("agent")
 # ============================================================
 
 class MCPServer:
-    """Manage lifecycle and JSON-RPC communication for one MCP server"""
+    """Manage lifecycle and JSON-RPC communication for one MCP server.
+
+    Transport modes:
+    - stdio: subprocess with stdin/stdout (serialized via lock)
+    - http: HTTP POST to MCP endpoint (concurrent, session-based)
+    - sse: Server-Sent Events (concurrent, session-based)
+
+    For concurrent tool execution, use http or sse transport.
+    notebooklm-mcp supports: --transport http|sse
+    """
 
     def __init__(self, name, config):
         self.name = name
         self.config = config
         self.transport = config.get("transport", "stdio")
         self._proc = None
-        self._lock = threading.Lock()  # Protect stdio read/write
+        self._lock = threading.Lock()  # Protect stdio read/write (not used for http/sse)
         self._req_id = 0
+        self._req_id_lock = threading.Lock()  # Thread-safe request ID generation
+        self._session_id = None  # HTTP transport session
         self._tools = []  # MCP raw tool definitions
 
     # ------ Lifecycle ------
@@ -65,13 +82,26 @@ class MCPServer:
         args = self.config.get("args", [])
         env = {**os.environ, **self.config.get("env", {})}
 
+        # Capture stderr in debug mode for diagnostics
+        stderr_mode = subprocess.PIPE if os.environ.get("MCP_DEBUG") else subprocess.DEVNULL
+
         self._proc = subprocess.Popen(
             [cmd] + args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,  # Discard stderr to prevent buffer deadlock
+            stderr=stderr_mode,
             env=env,
         )
+
+        # Start stderr reader thread in debug mode
+        if os.environ.get("MCP_DEBUG") and self._proc.stderr:
+            def _stderr_reader():
+                try:
+                    for line in self._proc.stderr:
+                        log.debug("[mcp] %s stderr: %s" % (self.name, line.decode().strip()))
+                except Exception:
+                    pass
+            threading.Thread(target=_stderr_reader, daemon=True, name=f"mcp-stderr-{self.name}").start()
 
     def _reconnect(self):
         """Reconnect once after crash"""
@@ -94,10 +124,12 @@ class MCPServer:
     # ------ JSON-RPC ------
 
     def _next_id(self):
-        self._req_id += 1
-        return self._req_id
+        """Thread-safe request ID generation"""
+        with self._req_id_lock:
+            self._req_id += 1
+            return self._req_id
 
-    def _request(self, method, params=None):
+    def _request(self, method, params=None, capture_session=False):
         """Send JSON-RPC request, return result"""
         msg = {
             "jsonrpc": "2.0",
@@ -110,7 +142,7 @@ class MCPServer:
         if self.transport == "stdio":
             return self._stdio_request(msg)
         else:
-            return self._http_request(msg)
+            return self._http_request(msg, capture_session=capture_session)
 
     def _stdio_request(self, msg):
         """stdio transport: write JSON+newline to stdin, read response from stdout.
@@ -160,21 +192,57 @@ class MCPServer:
                         self.name, err.get("message", ""), err.get("code", "?")))
                 return resp.get("result")
 
-    def _http_request(self, msg):
-        """HTTP transport: POST JSON-RPC to server URL"""
+    def _http_request(self, msg, capture_session=False):
+        """HTTP transport: POST JSON-RPC to server URL
+
+        MCP HTTP transport requires:
+        - Content-Type: application/json
+        - Accept: application/json, text/event-stream
+        - mcp-session-id header (after initialization)
+
+        Response is SSE format: "event: message\ndata: {...}\n\n"
+        """
         url = self.config.get("url", "")
         body = json.dumps(msg).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        # Include session ID if we have one
+        if self._session_id:
+            headers["mcp-session-id"] = self._session_id
+
         req = urllib.request.Request(
             url,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
-                resp = json.loads(r.read())
+                # Capture session ID from response headers
+                if capture_session:
+                    session_id = r.headers.get("mcp-session-id")
+                    if session_id:
+                        self._session_id = session_id
+                        log.info("[mcp] %s: session %s" % (self.name, session_id))
+                raw = r.read().decode("utf-8")
         except Exception as e:
             raise ConnectionError("MCP server %s HTTP error: %s" % (self.name, e))
+
+        # Parse SSE format: "event: message\ndata: {...}\n\n"
+        # Find the data line and extract JSON
+        resp = None
+        for line in raw.split("\n"):
+            if line.startswith("data: "):
+                try:
+                    resp = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
+                break
+
+        if resp is None:
+            raise ConnectionError("MCP server %s: invalid SSE response" % self.name)
 
         if "error" in resp:
             err = resp["error"]
@@ -186,11 +254,12 @@ class MCPServer:
 
     def _initialize(self):
         """MCP handshake"""
+        # Initialize and capture session ID for HTTP transport
         self._request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "724-office", "version": "1.0"},
-        })
+        }, capture_session=True)
         # Send initialized notification (no id = notification)
         notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         if self.transport == "stdio" and self._proc:

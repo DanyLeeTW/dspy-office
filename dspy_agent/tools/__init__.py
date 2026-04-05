@@ -1421,10 +1421,42 @@ def get_all_tools() -> List[Callable]:
     """
     Get all registered tools for DSPy ReAct agent.
 
+    This function returns tools from the internal registry.
+    For a unified tool source, use the adapter module:
+
+        from dspy_agent.tools.adapter import get_all_tools as get_adapted_tools
+        tools = get_adapted_tools()  # Uses tools.py as single source of truth
+
     Usage:
         tools = get_all_tools()
         agent = dspy.ReAct("question -> answer", tools=tools)
     """
     return registry.get_tools()
+
+
+# ============================================================
+#  Legacy Tool Adapter (for migration)
+# ============================================================
+
+def get_legacy_tools(ctx: dict = None) -> List[Callable]:
+    """
+    Get tools adapted from tools.py legacy registry.
+
+    This provides a migration path to unify tool definitions.
+    After migration, tools.py becomes the single source of truth.
+
+    Args:
+        ctx: Context dict with workspace, owner_id, session_key
+
+    Usage:
+        from dspy_agent.tools import get_legacy_tools
+        tools = get_legacy_tools({"workspace": "./workspace"})
+        agent = dspy.ReAct("question -> answer", tools=tools)
+    """
+    from .adapter import ToolAdapter
+    import tools as legacy_tools
+
+    adapter = ToolAdapter(legacy_tools._registry, ctx)
+    return adapter.get_all_tools()
 
 

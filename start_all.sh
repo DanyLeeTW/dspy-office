@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start All Services (Backend + Frontend)
+# Start All Services (MCP + Backend + Frontend)
 
 set -e
 
@@ -8,7 +8,15 @@ cd "$SCRIPT_DIR"
 
 echo "=== Starting All Services ==="
 
+# Start MCP servers first (HTTP transport for concurrent tool calls)
+if [ -f "./start_mcp_notebooklm.sh" ]; then
+    echo ""
+    echo "=== Starting MCP Servers ==="
+    ./start_mcp_notebooklm.sh || echo "[WARN] MCP server failed to start, continuing..."
+fi
+
 # Start backend
+echo ""
 ./start_server.sh
 
 # Start frontend
