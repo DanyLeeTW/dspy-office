@@ -5,6 +5,11 @@ This module provides a simple interface for sending messages through
 the messaging platform (WeChat Work/Enterprise WeChat).
 
 For DSPy Agent, this provides the message sending capability.
+
+Fallback Mode:
+    When token/guid are placeholders (containing "YOUR_"), messages
+    are printed to console instead of being sent to the API.
+    This allows testing the agent without a real messaging platform.
 """
 
 import json
@@ -22,6 +27,7 @@ _config = {}
 _api_url = ""
 _token = ""
 _guid = ""
+_fallback_mode = False  # When True, print to console instead of sending
 
 
 def init(config: Dict[str, Any]) -> None:
@@ -31,14 +37,25 @@ def init(config: Dict[str, Any]) -> None:
     Args:
         config: Messaging configuration dict with token, guid, api_url
     """
-    global _config, _api_url, _token, _guid
+    global _config, _api_url, _token, _guid, _fallback_mode
 
     _config = config
     _token = config.get("token", "")
     _guid = config.get("guid", "")
     _api_url = config.get("api_url", "http://api.messaging-platform.example.com/api/send")
 
-    log.info(f"[messaging] Initialized (guid={_guid[:8]}...)")
+    # Check if using placeholder credentials
+    if "YOUR_" in _token or "YOUR_" in _guid or "example.com" in _api_url:
+        _fallback_mode = True
+        log.warning("[messaging] Placeholder credentials detected - using FALLBACK mode")
+        log.warning("[messaging] Messages will be printed to console instead of being sent")
+
+    log.info(f"[messaging] Initialized (guid={_guid[:8]}..., fallback={_fallback_mode})")
+
+
+def is_fallback_mode() -> bool:
+    """Check if messaging is in fallback mode (console output only)."""
+    return _fallback_mode
 
 
 def send_text(to_id: str, content: str) -> Dict[str, Any]:
@@ -52,6 +69,16 @@ def send_text(to_id: str, content: str) -> Dict[str, Any]:
     Returns:
         API response dict
     """
+    # Fallback mode: print to console
+    if _fallback_mode:
+        print(f"\n{'='*50}")
+        print(f"[FALLBACK] Message to: {to_id}")
+        print(f"{'='*50}")
+        print(content)
+        print(f"{'='*50}\n")
+        log.info(f"[messaging] [FALLBACK] Would send to {to_id}: {content[:50]}...")
+        return {"code": 0, "msg": "Fallback mode - printed to console"}
+
     if not _token or not _guid:
         log.warning("[messaging] Not configured, cannot send message")
         return {"code": -1, "msg": "Not configured"}

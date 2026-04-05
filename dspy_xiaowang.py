@@ -126,36 +126,14 @@ scheduler._chat_fn = dspy_chat_fn
 
 
 # ============================================================
-#  Debounce (ported from xiaowang.py)
+#  Debounce (using DebounceBuffer class)
 # ============================================================
 
-_debounce_buffers = {}
-_debounce_timers = {}
-_debounce_lock = threading.Lock()
+from dspy_agent.server.debounce import DebounceBuffer
 
 
-def _debounce_flush(sender_id):
-    with _debounce_lock:
-        fragments = _debounce_buffers.pop(sender_id, [])
-        _debounce_timers.pop(sender_id, None)
-
-    if not fragments:
-        return
-
-    texts = []
-    images = []
-    for frag in fragments:
-        if isinstance(frag, dict):
-            if frag.get("text"):
-                texts.append(frag["text"])
-            images.extend(frag.get("images", []))
-        else:
-            texts.append(str(frag))
-
-    combined_text = "\n".join(texts)
-    if len(fragments) > 1:
-        log.info(f"[debounce] {sender_id}: merged {len(fragments)} messages")
-
+def _handle_debounce_flush(sender_id: str, merged_text: str, images: list):
+    """Handle flushed debounce messages."""
     try:
         if str(sender_id) not in OWNER_IDS:
             messaging.send_text(sender_id, "Sorry, this agent is currently in single-user mode.")
@@ -172,7 +150,7 @@ def _debounce_flush(sender_id):
 
         # Call DSPy agent
         result = agent(
-            user_request=combined_text,
+            user_request=merged_text,
             conversation_history=history,
             session_key=session_key
         )
@@ -180,7 +158,7 @@ def _debounce_flush(sender_id):
         reply = result.response
 
         # Save session
-        messages.append({"role": "user", "content": combined_text})
+        messages.append({"role": "user", "content": merged_text})
         messages.append({"role": "assistant", "content": reply})
         session_manager.save(session_key, messages)
 
@@ -206,22 +184,17 @@ def _debounce_flush(sender_id):
             pass
 
 
-def debounce_message(sender_id, text, images=None):
-    # Start embedding immediately so it's ready by the time the debounce fires
-    mem_mod.prefetch(text)
+# Initialize debounce buffer
+debounce_buffer = DebounceBuffer(
+    delay_seconds=DEBOUNCE_SECONDS,
+    flush_callback=_handle_debounce_flush,
+    prefetch_callback=mem_mod.prefetch,
+)
 
-    with _debounce_lock:
-        frag = {"text": text, "images": images or []}
-        _debounce_buffers.setdefault(sender_id, []).append(frag)
-        old_timer = _debounce_timers.get(sender_id)
-        if old_timer:
-            old_timer.cancel()
-        timer = threading.Timer(DEBOUNCE_SECONDS, _debounce_flush, args=[sender_id])
-        timer.daemon = True
-        timer.start()
-        _debounce_timers[sender_id] = timer
-        count = len(_debounce_buffers[sender_id])
-    log.info(f"[debounce] {sender_id}: buffered #{count}")
+
+def debounce_message(sender_id, text, images=None):
+    """Add message to debounce buffer."""
+    debounce_buffer.add(sender_id, text, images)
 
 
 def split_message(text, max_bytes=1800):
@@ -367,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
+                self.send_header("Connection", "close")  # Close after response
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
 
@@ -425,24 +398,32 @@ class Handler(BaseHTTPRequestHandler):
                                 "result": str(result)[:500] if result else ''
                             })
 
-                        # Create streaming agent with callbacks
-                        from dspy_agent.modules import StreamingToolAgent
-                        streaming_agent = StreamingToolAgent(
-                            tools=get_all_tools(),
-                            retrieve_fn=None,
-                            max_iters=20,
-                            on_tool_start=on_tool_start,
-                            on_tool_end=on_tool_end
-                        )
+                        # Use the main agent instead of creating new StreamingToolAgent
+                        # This avoids DSPy ReAct initialization issues per-request
+                        try:
+                            result = agent(
+                                user_request=msg,
+                                conversation_history=history,
+                                session_key=session_key
+                            )
+                            log.info(f"[stream] agent completed, elapsed={time.time()-t0:.2f}s")
+                            reply = result.response
+                            memory_context = result.memory_context if hasattr(result, 'memory_context') else ''
 
-                        result = streaming_agent(
-                            user_request=msg,
-                            conversation_history=history,
-                            session_key=session_key
-                        )
-                        log.info(f"[stream] agent completed, elapsed={time.time()-t0:.2f}s")
-                        reply = result.response
-                        memory_context = result.memory_context if hasattr(result, 'memory_context') else ''
+                            # Log tool calls if any
+                            if hasattr(result, 'trajectory') and result.trajectory:
+                                traj = result.trajectory
+                                idx = 0
+                                while f'tool_name_{idx}' in traj:
+                                    tool_name = traj.get(f'tool_name_{idx}', '')
+                                    if tool_name and tool_name != 'finish':
+                                        on_tool_start(tool_name, traj.get(f'tool_args_{idx}', {}))
+                                        on_tool_end(tool_name, traj.get(f'observation_{idx}', ''))
+                                    idx += 1
+
+                        except Exception as agent_error:
+                            log.error(f"[stream] agent error: {agent_error}", exc_info=True)
+                            raise
 
                         # Emit final response
                         _send_sse_event("response", {
